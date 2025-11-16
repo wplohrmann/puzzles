@@ -31,6 +31,7 @@ def show_task(task_name: str, solve: Optional[Solver] = None) -> None:
         axs[i, 0].set_title("Input")
         axs[i, 1].imshow(output_grid)
         axs[i, 1].set_title("Output")
+    plt.suptitle(task_name)
     plt.show()
     solution_path = os.path.join(f"solutions/{task_name.replace('.json', '.py')}")
     if solve is None:
