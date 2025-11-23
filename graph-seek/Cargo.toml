@@ -1,6 +1,5 @@
 [dependencies]
-pest = "2.7"
-pest_derive = "2.7"
+nom = "7"
 [package]
 name = "graph-seek"
 version = "0.1.0"

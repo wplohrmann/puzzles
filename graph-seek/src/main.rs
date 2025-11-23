@@ -1,5 +1,4 @@
 mod parse_program;
-mod parser;
 
 #[derive(Debug)]
 pub enum ValueType {
@@ -48,10 +47,11 @@ pub struct Program {
 fn main() {
     // Example: parse a program from a string
     let example = r#"
-add_1 :: int -> int
-add_1 n = n + 1
-five :: int
-five = add_1 4"#;
+        add_1 :: int -> int
+        add_1 n = plus n 1
+        five :: int
+        five = add_1 4
+    "#;
     let parsed = parse_program::parse_program(example);
     match parsed {
         Ok(prog) => println!("{:#?}", prog),

@@ -1,137 +1,145 @@
-use pest::Parser;
-use pest::iterators::Pair;
-
+use nom::{IResult, branch::alt, bytes::complete::{tag, take_while1}, character::complete::{char, digit1, multispace0, newline}, combinator::{map, map_res, opt, recognize}, multi::{many0, many1}, sequence::{delimited, preceded, terminated, tuple}};
+// Helper to wrap a parser and consume surrounding whitespace
+fn ws<'a, F: 'a, O>(inner: F) -> impl FnMut(&'a str) -> IResult<&'a str, O>
+where
+	F: FnMut(&'a str) -> IResult<&'a str, O>,
+{
+	delimited(multispace0, inner, multispace0)
+}
 use crate::{Program, Definition, Branch, Expr, PatternElement, ValueType, Literal};
 
-use super::parser::Rule;
-
 pub fn parse_program(input: &str) -> Result<Program, String> {
-    let pairs = LangParser::parse(Rule::program, input).map_err(|e| e.to_string())?;
-    let mut definitions = Vec::new();
-    for pair in pairs {
-        match pair.as_rule() {
-            Rule::program => {
-                for def in pair.into_inner() {
-                    if let Some(defn) = parse_definition(def)? {
-                        definitions.push(defn);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(Program { definitions })
+	match program(input) {
+		Ok((_, prog)) => Ok(prog),
+		Err(e) => Err(format!("Parse error: {:?}", e)),
+	}
 }
 
-fn parse_definition(pair: Pair<Rule>) -> Result<Option<Definition>, String> {
-    match pair.as_rule() {
-        Rule::definition => {
-            let mut inner = pair.into_inner();
-            let name = inner.next().unwrap().as_str().to_string();
-            let type_sig = inner.next().unwrap();
-            let args = parse_type_sig(type_sig)?;
-            let mut branches = Vec::new();
-            for branch in inner {
-                branches.push(parse_branch(branch)?);
-            }
-            Ok(Some(Definition { name, args, branches }))
-        }
-        Rule::EOI => Ok(None),
-        _ => Ok(None),
-    }
+fn program(input: &str) -> IResult<&str, Program> {
+	let (input, _) = multispace0(input)?;
+	let (input, definitions) = many0(terminated(definition, multispace0))(input)?;
+	let (input, _) = multispace0(input)?;
+	Ok((input, Program { definitions }))
 }
 
-fn parse_type_sig(pair: Pair<Rule>) -> Result<Vec<ValueType>, String> {
-    let mut types = Vec::new();
-    for t in pair.into_inner() {
-        match t.as_rule() {
-            Rule::base_type => {
-                match t.as_str() {
-                    "int" => types.push(ValueType::Int),
-                    "[int]" => types.push(ValueType::List),
-                    "[[int]]" => types.push(ValueType::Matrix),
-                    _ => return Err(format!("Unknown base type: {}", t.as_str())),
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(types)
+fn definition(input: &str) -> IResult<&str, Definition> {
+	let (input, _) = opt(newline)(input)?;
+	let (input, name) = ws(identifier)(input)?;
+	let (input, _) = ws(tag("::"))(input)?;
+	let (input, args) = ws(type_sig)(input)?;
+	let (input, branches) = many1(branch)(input)?;
+	Ok((input, Definition { name, args, branches }))
 }
 
-fn parse_branch(pair: Pair<Rule>) -> Result<Branch, String> {
-    let mut inner = pair.into_inner();
-    let _name = inner.next().unwrap(); // function name, can be ignored
-    let mut pattern = Vec::new();
-    // Patterns until '='
-    loop {
-        let next = inner.peek();
-        if let Some(p) = next {
-            if p.as_rule() == Rule::expr { break; }
-            let pat = inner.next().unwrap();
-            pattern.push(parse_pattern(pat)?);
-        } else {
-            break;
-        }
-    }
-    let expr = parse_expr(inner.next().unwrap())?;
-    Ok(Branch { pattern, expression: expr })
+fn branch(input: &str) -> IResult<&str, Branch> {
+	let (input, _name) = ws(identifier)(input)?;
+	let (input, pattern) = many0(ws(pattern))(input)?;
+	let (input, _) = ws(tag("="))(input)?;
+	let (input, expression) = ws(expr)(input)?;
+	let (input, _) = opt(ws(newline))(input)?;
+	Ok((input, Branch { pattern, expression }))
 }
 
-fn parse_pattern(pair: Pair<Rule>) -> Result<PatternElement, String> {
-    match pair.as_rule() {
-        Rule::literal => {
-            let lit = parse_literal(pair)?;
-            Ok(PatternElement::Literal(lit))
-        }
-        Rule::identifier => Ok(PatternElement::Variable(pair.as_str().to_string())),
-        _ => Err(format!("Unknown pattern: {:?}", pair)),
-    }
+fn pattern(input: &str) -> IResult<&str, PatternElement> {
+	alt((
+		map(ws(literal), PatternElement::Literal),
+		map(ws(identifier), PatternElement::Variable),
+	))(input)
 }
 
-fn parse_expr(pair: Pair<Rule>) -> Result<Expr, String> {
-    match pair.as_rule() {
-        Rule::expr | Rule::infix_expr | Rule::add_expr | Rule::mul_expr => {
-            let mut inner = pair.into_inner();
-            let first = inner.next().unwrap();
-            let mut left = parse_expr(first)?;
-            while let Some(op_pair) = inner.next() {
-                let op = op_pair.as_str();
-                let right = parse_expr(inner.next().unwrap())?;
-                left = Expr::FunctionCall(op.to_string(), vec![left, right]);
-            }
-            Ok(left)
-        }
-        Rule::atom => {
-            let mut inner = pair.into_inner();
-            let first = inner.next().unwrap();
-            match first.as_rule() {
-                Rule::literal => Ok(Expr::Literal(parse_literal(first)?)),
-                Rule::identifier => Ok(Expr::Variable(first.as_str().to_string())),
-                Rule::expr => parse_expr(first),
-                _ => Err(format!("Unknown atom: {:?}", first)),
-            }
-        }
-        Rule::literal => Ok(Expr::Literal(parse_literal(pair)?)),
-        Rule::identifier => Ok(Expr::Variable(pair.as_str().to_string())),
-        _ => Err(format!("Unknown expr: {:?}", pair)),
-    }
+fn expr(input: &str) -> IResult<&str, Expr> {
+	infix_expr(input)
 }
 
-fn parse_literal(pair: Pair<Rule>) -> Result<Literal, String> {
-    let inner = pair.clone().into_inner().next();
-    match inner {
-        Some(p) => match p.as_rule() {
-            Rule::int_lit => Ok(Literal::Literal(p.as_str().parse().unwrap())),
-            Rule::nan_lit => Ok(Literal::NaN),
-            _ => Err(format!("Unknown literal: {:?}", p)),
-        },
-        None => match pair.as_rule() {
-            Rule::int_lit => Ok(Literal::Literal(pair.as_str().parse().unwrap())),
-            Rule::nan_lit => Ok(Literal::NaN),
-            _ => Err(format!("Unknown literal: {:?}", pair)),
-        },
-    }
+fn infix_expr(input: &str) -> IResult<&str, Expr> {
+	add_expr(input)
 }
 
-use super::parser::LangParser;
+fn add_expr(input: &str) -> IResult<&str, Expr> {
+	let (input, init) = mul_expr(input)?;
+	let (input, rest) = many0(tuple((add_op, mul_expr)))(input)?;
+	let expr = rest.into_iter().fold(init, |acc, (op, rhs)| {
+		Expr::FunctionCall(op, vec![acc, rhs])
+	});
+	Ok((input, expr))
+}
+
+fn mul_expr(input: &str) -> IResult<&str, Expr> {
+	let (input, init) = atom(input)?;
+	let (input, rest) = many0(tuple((mul_op, atom)))(input)?;
+	let expr = rest.into_iter().fold(init, |acc, (op, rhs)| {
+		Expr::FunctionCall(op, vec![acc, rhs])
+	});
+	Ok((input, expr))
+}
+
+fn atom(input: &str) -> IResult<&str, Expr> {
+	alt((
+		map(ws(literal), Expr::Literal),
+		map(ws(identifier), Expr::Variable),
+		ws(delimited(
+			char('('),
+			expr,
+			char(')')
+		)),
+	))(input)
+}
+
+fn add_op(input: &str) -> IResult<&str, String> {
+	ws(alt((
+		map(tag("+"), |s: &str| s.to_string()),
+		map(tag("-"), |s: &str| s.to_string()),
+	)))(input)
+}
+
+fn mul_op(input: &str) -> IResult<&str, String> {
+	ws(alt((
+		map(tag("*"), |s: &str| s.to_string()),
+		map(tag("/"), |s: &str| s.to_string()),
+	)))(input)
+}
+
+fn literal(input: &str) -> IResult<&str, Literal> {
+	alt((
+		map(ws(int_lit), Literal::Literal),
+		map(ws(nan_lit), |_| Literal::NaN),
+	))(input)
+}
+
+fn int_lit(input: &str) -> IResult<&str, i32> {
+	map_res(
+		recognize(digit1),
+		|s: &str| s.parse::<i32>()
+	)(input)
+}
+
+fn nan_lit(input: &str) -> IResult<&str, ()> {
+	map(tag("NaN"), |_| ())(input)
+}
+
+fn identifier(input: &str) -> IResult<&str, String> {
+	ws(map(
+		recognize(
+			take_while1(|c: char| c.is_ascii_alphanumeric() || c == '_')
+		),
+		|s: &str| s.to_string()
+	))(input)
+}
+
+fn type_sig(input: &str) -> IResult<&str, Vec<ValueType>> {
+	let (input, first) = ws(base_type)(input)?;
+	let (input, rest) = many0(preceded(ws(tag("->")), ws(base_type)))(input)?;
+	let mut types = vec![first];
+	types.extend(rest);
+	Ok((input, types))
+}
+
+fn base_type(input: &str) -> IResult<&str, ValueType> {
+	ws(alt((
+		map(tag("int"), |_| ValueType::Int),
+		map(tag("[int]"), |_| ValueType::List),
+		map(tag("[[int]]"), |_| ValueType::Matrix),
+	)))(input)
+}
+
+
