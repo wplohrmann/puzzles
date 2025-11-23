@@ -1,0 +1,26 @@
+WHITESPACE = _{ " " | "\t" }
+NEWLINE = _{ "\n" | "\r\n" }
+
+program = { SOI ~ WHITESPACE* ~ definition* ~ WHITESPACE* ~ EOI }
+definition = { NEWLINE? ~ identifier ~ "::" ~ type_sig ~ NEWLINE ~ branch+ }
+
+branch = { identifier ~ pattern* ~ "=" ~ expr ~ NEWLINE? }
+pattern = { literal | identifier }
+
+expr = _{ infix_expr }
+
+infix_expr = { add_expr }
+add_expr = { mul_expr ~ (add_op ~ mul_expr)* }
+mul_expr = { atom ~ (mul_op ~ atom)* }
+atom = { literal | identifier | "(" ~ expr ~ ")" }
+
+add_op = _{ "+" | "-" }
+mul_op = _{ "*" | "/" }
+
+literal = { int_lit | nan_lit }
+int_lit = @{ ASCII_DIGIT+ }
+nan_lit = @{ "NaN" }
+
+identifier = @{ (ASCII_ALPHANUMERIC | "_")+ }
+type_sig = { base_type ~ ("->" ~ base_type)* }
+base_type = { "int" | "[int]" | "[[int]]" }
