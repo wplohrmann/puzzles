@@ -45,7 +45,6 @@ pub struct Program {
 }
 
 fn main() {
-    // Example: parse a program from a string
     let example = r#"
         add_1 :: int -> int
         add_1 n = plus n 1
