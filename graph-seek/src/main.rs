@@ -1,6 +1,6 @@
 mod parse_program;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ValueType {
     Int,
     List,
