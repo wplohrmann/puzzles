@@ -1,35 +1,43 @@
 mod parse_program;
 
 #[derive(Debug, Clone)]
-pub enum ValueType {
+pub enum PrimitiveType {
     Int,
-    List,
-    Matrix,
+    Bool,
+}
+
+#[derive(Debug)]
+pub enum Type {
+    Primitive(PrimitiveType),
+    Product(Vec<Box<Type>>),
+    Sum(Vec<Box<Type>>),
+    Refined((Box<Type>, Box<Expr>)),
+    Func {
+        args: Vec<Box<Type>>,
+        ret: Box<Type>,
+    }
 }
 
 #[derive(Debug)]
 pub enum Literal {
-    Literal(i32),
-    NaN,
+    Int(i32),
+    Bool(bool),
+    Error,
 }
 
 #[derive(Debug)]
-pub enum Expr {
+pub enum Value {
     Literal(Literal),
     Variable(String),
     FunctionCall(String, Vec<Expr>),
 }
-#[derive(Debug)]
-pub enum PatternElement {
-    Literal(Literal),
-    Variable(String),
-}
 
 #[derive(Debug)]
-pub struct Branch {
-    pattern: Vec<PatternElement>,
-    expression: Expr,
+pub struct Expr {
+    e_type: Type,
+    value: Value
 }
+
 
 #[derive(Debug)]
 pub struct Definition {
