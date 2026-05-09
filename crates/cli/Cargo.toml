@@ -1,0 +1,13 @@
+[package]
+name = "cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "graph-seek"
+path = "src/main.rs"
+
+[dependencies]
+lang = { path = "../lang" }

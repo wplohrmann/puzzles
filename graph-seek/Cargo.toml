@@ -1,6 +1,0 @@
-[dependencies]
-nom = "7"
-[package]
-name = "graph-seek"
-version = "0.1.0"
-edition = "2024"

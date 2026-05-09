@@ -1,0 +1,13 @@
+[package]
+name = "training"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lang = { path = "../lang" }
+neural = { path = "../neural" }
+search = { path = "../search" }
+library = { path = "../library" }
+tasks = { path = "../tasks" }
