@@ -239,8 +239,9 @@ fn fold_sum_1_2_3_eq_6() {
 }
 
 #[test]
-fn fold_reverse_via_cons() {
-    // fold cons nil [1,2,3] = [3,2,1]
+fn fold_cons_nil_is_identity() {
+    // With right-fold semantics, `fold cons nil [1,2,3]` reconstructs the
+    // input: cons 1 (cons 2 (cons 3 nil)) = [1,2,3].
     let mut b = Builder::new();
     let xs: Vec<_> = (1..=3).map(|i| b.int(i)).collect();
     let lst = b.list(xs);
@@ -248,7 +249,7 @@ fn fold_reverse_via_cons() {
     let cons = b.pref(BuiltinId::Cons);
     let fold = b.pref(BuiltinId::Fold);
     let prog = b.ap3(fold, cons, nil, lst);
-    let expected = Value::list_from(vec![Value::Int(3), Value::Int(2), Value::Int(1)]);
+    let expected = Value::list_from(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
     assert_eq!(b.run(prog), expected);
 }
 
@@ -300,6 +301,85 @@ fn unfold_range_0_to_3() {
         b.run(prog),
         Value::list_from(vec![Value::Int(0), Value::Int(1), Value::Int(2)]),
     );
+}
+
+// --- combinators (K, B) -------------------------------------------------
+
+#[test]
+fn k_drops_second_arg() {
+    // k 7 9 = 7
+    let mut b = Builder::new();
+    let k = b.pref(BuiltinId::K);
+    let seven = b.int(7);
+    let nine = b.int(9);
+    let prog = b.ap2(k, seven, nine);
+    assert_eq!(b.run(prog), Value::Int(7));
+}
+
+#[test]
+fn b_composes() {
+    // (b (add 1) (mul 2)) 5 = add 1 (mul 2 5) = 11
+    let mut b = Builder::new();
+    let bcomb = b.pref(BuiltinId::B);
+    let add = b.pref(BuiltinId::Add);
+    let mul = b.pref(BuiltinId::Mul);
+    let one = b.int(1);
+    let two = b.int(2);
+    let five = b.int(5);
+    let inc = b.ap(add, one);
+    let dbl = b.ap(mul, two);
+    let composed = b.ap2(bcomb, inc, dbl);
+    let prog = b.ap(composed, five);
+    assert_eq!(b.run(prog), Value::Int(11));
+}
+
+#[test]
+fn length_via_fold_and_k() {
+    // length = fold (k (add 1)) 0 — works because k discards the element.
+    let mut b = Builder::new();
+    let k = b.pref(BuiltinId::K);
+    let add = b.pref(BuiltinId::Add);
+    let one = b.int(1);
+    let zero = b.int(0);
+    let fold = b.pref(BuiltinId::Fold);
+    let inc = b.ap(add, one); // Int -> Int
+    let cb = b.ap(k, inc);    // ∀x. x -> Int -> Int
+    let xs: Vec<_> = (1..=5).map(|i| b.int(i)).collect();
+    let lst = b.list(xs);
+    let prog = b.ap3(fold, cb, zero, lst);
+    assert_eq!(b.run(prog), Value::Int(5));
+}
+
+#[test]
+fn head_via_fold_and_k() {
+    // head = fold k 0 — with right-fold, K picks the first element.
+    let mut b = Builder::new();
+    let k = b.pref(BuiltinId::K);
+    let zero = b.int(0);
+    let fold = b.pref(BuiltinId::Fold);
+    let xs: Vec<_> = [11, 22, 33].iter().map(|i| b.int(*i)).collect();
+    let lst = b.list(xs);
+    let prog = b.ap3(fold, k, zero, lst);
+    assert_eq!(b.run(prog), Value::Int(11));
+}
+
+#[test]
+fn map_add_one_via_fold_b_cons() {
+    // add-one-to-each = fold (b cons (add 1)) nil
+    let mut b = Builder::new();
+    let bcomb = b.pref(BuiltinId::B);
+    let cons = b.pref(BuiltinId::Cons);
+    let add = b.pref(BuiltinId::Add);
+    let one = b.int(1);
+    let nil = b.pref(BuiltinId::Nil);
+    let fold = b.pref(BuiltinId::Fold);
+    let inc = b.ap(add, one);              // Int -> Int
+    let cb = b.ap2(bcomb, cons, inc);      // Int -> List Int -> List Int
+    let xs: Vec<_> = [1, 2, 3].iter().map(|i| b.int(*i)).collect();
+    let lst = b.list(xs);
+    let prog = b.ap3(fold, cb, nil, lst);
+    let expected = Value::list_from(vec![Value::Int(2), Value::Int(3), Value::Int(4)]);
+    assert_eq!(b.run(prog), expected);
 }
 
 // --- function (curried) program with input ------------------------------

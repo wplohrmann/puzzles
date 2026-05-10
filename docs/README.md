@@ -15,3 +15,13 @@ Read these in order:
 
 If you only read two: [00-overview.md](./00-overview.md) and
 [09-questions.md](./09-questions.md).
+
+## Per-milestone decisions
+
+Implementation logs from each milestone live in
+[`decisions/`](./decisions/). They record the calls made while shipping
+that milestone — open the relevant file when picking up where the
+previous milestone left off.
+
+- [decisions/m1-lang.md](./decisions/m1-lang.md) — `lang` crate.
+- [decisions/m2-search-tasks.md](./decisions/m2-search-tasks.md) — `tasks` and `search`.

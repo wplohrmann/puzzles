@@ -296,7 +296,9 @@ fn exec_builtin(
             Ok(Value::List(Rc::new(out)))
         }
         Fold => {
-            // fold f z xs
+            // Right-fold: fold f z [a,b,c] = f a (f b (f c z)).
+            // Implemented iteratively by walking the list right-to-left and
+            // computing acc' = f x acc at each step.
             let f = args[0].clone();
             let z = args[1].clone();
             let xs = match &args[2] {
@@ -304,7 +306,7 @@ fn exec_builtin(
                 _ => return Err(Error::PrimitiveTypeMismatch("fold")),
             };
             let mut acc = z;
-            for x in xs.iter() {
+            for x in xs.iter().rev() {
                 if *fuel == 0 { return Err(Error::OutOfFuel); }
                 let f1 = apply(arena, lib, f.clone(), x.clone(), fuel)?;
                 acc = apply(arena, lib, f1, acc, fuel)?;
@@ -347,6 +349,18 @@ fn exec_builtin(
                 }
             }
             Ok(Value::list_from(out))
+        }
+        K => {
+            // K x y = x
+            Ok(args[0].clone())
+        }
+        B => {
+            // B f g x = f (g x)
+            let f = args[0].clone();
+            let g = args[1].clone();
+            let x = args[2].clone();
+            let gx = apply(arena, lib, g, x, fuel)?;
+            apply(arena, lib, f, gx, fuel)
         }
     }
 }

@@ -148,6 +148,45 @@ search runs.
 - Library serialisation. Programs serialise; libraries don't yet. Will
   matter when checkpointing the wake/sleep loop.
 
+## Patches applied at the start of M2
+
+### 16. Added `K` and `B` combinators to the seed library
+
+`k : ∀a b. a → b → a` and `b : ∀a b c. (b → c) → (a → b) → a → c`. Without
+these, the search (which deliberately doesn't propose lambdas as actions
+per `09-questions.md` #3) cannot construct most useful fold callbacks —
+e.g. `length` needs `λ_ acc. acc + 1`, expressible as `k (add 1)`, but
+inexpressible without `k`. With `k` and `b` in the seed library, the
+roadmap's stated trivial-list tasks (head, length, add-one-to-each)
+become reachable as small App-trees.
+
+`I` (identity) and `C` (flip) were considered and dropped. `I = λx. x` is
+expressible as `k k` if needed but isn't required for the trivial set.
+`C` is needed only for tasks that wouldn't be M2 acceptance.
+
+Discussion thread is in `docs/decisions/m2-search-tasks.md` §1.
+
+### 17. Switched `fold` to standard right-fold semantics
+
+Previously: `fold f z [a,b,c] = f c (f b (f a z))` — neither standard
+left- nor right-fold; equivalent to `foldr f z (reverse xs)`. New
+semantics: `fold f z [a,b,c] = f a (f b (f c z))`, which is the
+canonical right-fold. The signature `(a → b → b) → b → List a → b` is
+unchanged.
+
+The previous behaviour wasn't documented as a deliberate choice; it
+fell out of the simplest iterative implementation (`for x in xs:
+acc = f x acc`). Right-fold matches the architectural commitment in
+`01-language.md` that `head, map, filter` should be derivable from
+`fold` — those derivations only work with right-fold direction.
+
+The single test that depended on the old direction
+(`fold_reverse_via_cons`) was renamed to `fold_cons_nil_is_identity`
+with the new expected output, since right-fold makes `fold cons nil`
+equal to identity (it reconstructs the input). All other tests are
+direction-independent (sum is commutative+associative; the `fold_length`
+test uses an explicit lambda whose body ignores the element).
+
 ## Things to flag for review
 
 If any of the calls above seem wrong, the most consequential ones to

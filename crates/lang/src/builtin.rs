@@ -24,9 +24,16 @@ pub enum BuiltinId {
     // List
     Nil, Cons,
     /// `fold : forall a b. (a -> b -> b) -> b -> List a -> b`
+    /// Right-fold semantics: `fold f z [a,b,c] = f a (f b (f c z))`.
     Fold,
     /// `unfold : forall a b. (b -> Pair (Pair a b) Bool) -> b -> List a`
     Unfold,
+
+    // Combinators
+    /// `k : forall a b. a -> b -> a` — the K combinator (`λx y. x`).
+    K,
+    /// `b : forall a b c. (b -> c) -> (a -> b) -> a -> c` — composition.
+    B,
 }
 
 impl BuiltinId {
@@ -49,6 +56,8 @@ impl BuiltinId {
             BuiltinId::Cons => "cons",
             BuiltinId::Fold => "fold",
             BuiltinId::Unfold => "unfold",
+            BuiltinId::K => "k",
+            BuiltinId::B => "b",
         }
     }
 
@@ -130,6 +139,23 @@ impl BuiltinId {
                     Ty::list(Ty::Var(0)),
                 ),
             ),
+            // forall a b. a -> b -> a
+            BuiltinId::K => TypeScheme::forall(
+                vec![0, 1],
+                Ty::func_chain(&[Ty::Var(0), Ty::Var(1)], Ty::Var(0)),
+            ),
+            // forall a b c. (b -> c) -> (a -> b) -> a -> c
+            BuiltinId::B => TypeScheme::forall(
+                vec![0, 1, 2],
+                Ty::func_chain(
+                    &[
+                        Ty::func(Ty::Var(1), Ty::Var(2)),
+                        Ty::func(Ty::Var(0), Ty::Var(1)),
+                        Ty::Var(0),
+                    ],
+                    Ty::Var(2),
+                ),
+            ),
         }
     }
 }
@@ -154,6 +180,8 @@ pub const ALL_BUILTINS: &[BuiltinId] = &[
     BuiltinId::Cons,
     BuiltinId::Fold,
     BuiltinId::Unfold,
+    BuiltinId::K,
+    BuiltinId::B,
 ];
 
 /// Build a fresh library populated with every built-in.
@@ -194,6 +222,8 @@ mod tests {
         assert_eq!(lib.arity(lib.lookup("unfold").unwrap()), 2);
         assert_eq!(lib.arity(lib.lookup("pair").unwrap()), 2);
         assert_eq!(lib.arity(lib.lookup("not").unwrap()), 1);
+        assert_eq!(lib.arity(lib.lookup("k").unwrap()), 2);
+        assert_eq!(lib.arity(lib.lookup("b").unwrap()), 3);
     }
 
     #[test]
