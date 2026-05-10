@@ -1,9 +1,10 @@
 //! End-to-end test programs.
 //!
-//! Each test constructs a small program by hand using the typed
-//! constructors, evaluates it, and checks the result. Together these
-//! exercise: arithmetic, conditionals, pairs, lists, fold, unfold,
-//! lambdas, currying, polymorphism, lazy `if`, and `Bottom` propagation.
+//! Each test constructs a small program by hand using the constructors,
+//! evaluates it, and checks the result. Together these exercise:
+//! arithmetic, conditionals, pairs, lists, fold, unfold, lambdas,
+//! currying, runtime polymorphism, lazy `if`, `Bottom` propagation, and
+//! the K/B combinators.
 
 use lang::arena::Arena;
 use lang::builtin::{seed_builtin_library, BuiltinId};
@@ -11,14 +12,12 @@ use lang::construct::{app, lambda, lit, param, prim_ref};
 use lang::eval::{eval_program, Value};
 use lang::ir::LitValue;
 use lang::library::{Library, PrimId};
-use lang::ty::{Ty, TyVarGen};
 
 const FUEL: u32 = 1_000_000;
 
 struct Builder {
     arena: Arena,
     lib: Library,
-    gen: TyVarGen,
 }
 
 impl Builder {
@@ -26,7 +25,6 @@ impl Builder {
         Builder {
             arena: Arena::new(),
             lib: seed_builtin_library(),
-            gen: TyVarGen::new(),
         }
     }
 
@@ -47,7 +45,7 @@ impl Builder {
     }
 
     fn ap(&mut self, f: lang::arena::NodeId, a: lang::arena::NodeId) -> lang::arena::NodeId {
-        app(&mut self.arena, &mut self.gen, f, a).expect("type-checks")
+        app(&mut self.arena, f, a)
     }
 
     fn ap2(&mut self, f: lang::arena::NodeId, a: lang::arena::NodeId, b: lang::arena::NodeId)
@@ -65,7 +63,6 @@ impl Builder {
         self.ap(f2, c)
     }
 
-    /// Build the list `[xs[0], xs[1], ...]` with element type `elem_ty`.
     fn list(&mut self, xs: Vec<lang::arena::NodeId>) -> lang::arena::NodeId {
         let mut acc = self.pref(BuiltinId::Nil);
         for x in xs.into_iter().rev() {
@@ -117,6 +114,18 @@ fn div_by_zero_yields_bottom() {
     assert!(v.is_bottom(), "expected Bottom, got {:?}", v);
 }
 
+#[test]
+fn add_with_bool_yields_bottom() {
+    // `add true 1` is now constructable (no static type-check). At runtime
+    // it must surface as Bottom.
+    let mut b = Builder::new();
+    let add = b.pref(BuiltinId::Add);
+    let truth = b.boolean(true);
+    let one = b.int(1);
+    let prog = b.ap2(add, truth, one);
+    assert!(b.run(prog).is_bottom());
+}
+
 // --- booleans -----------------------------------------------------------
 
 #[test]
@@ -153,13 +162,12 @@ fn if_true_picks_then() {
 
 #[test]
 fn if_short_circuits_unused_branch() {
-    // if true 0 (div 1 0) should be 0 — the bad branch must not run.
     let mut b = Builder::new();
     let iff = b.pref(BuiltinId::If);
     let div = b.pref(BuiltinId::Div);
     let zero = b.int(0);
     let one = b.int(1);
-    let bad = b.ap2(div, one, zero); // div 1 0
+    let bad = b.ap2(div, one, zero);
     let t = b.boolean(true);
     let prog = b.ap3(iff, t, zero, bad);
     assert_eq!(b.run(prog), Value::Int(0));
@@ -175,8 +183,7 @@ fn if_propagates_bottom_in_chosen_branch() {
     let bad = b.ap2(div, one, zero);
     let t = b.boolean(true);
     let prog = b.ap3(iff, t, bad, one);
-    let v = b.run(prog);
-    assert!(v.is_bottom());
+    assert!(b.run(prog).is_bottom());
 }
 
 // --- pairs --------------------------------------------------------------
@@ -240,8 +247,6 @@ fn fold_sum_1_2_3_eq_6() {
 
 #[test]
 fn fold_cons_nil_is_identity() {
-    // With right-fold semantics, `fold cons nil [1,2,3]` reconstructs the
-    // input: cons 1 (cons 2 (cons 3 nil)) = [1,2,3].
     let mut b = Builder::new();
     let xs: Vec<_> = (1..=3).map(|i| b.int(i)).collect();
     let lst = b.list(xs);
@@ -259,12 +264,10 @@ fn fold_length() {
     let mut b = Builder::new();
     let one = b.int(1);
     let add = b.pref(BuiltinId::Add);
-    // body is (add 1 acc) where acc is param 0 (innermost), x is param 1.
-    let acc_p = param(&mut b.arena, 0, Ty::int());
+    let acc_p = param(&mut b.arena, 0);
     let body = b.ap2(add, one, acc_p);
-    let inner_lam = lambda(&mut b.arena, Ty::int(), body);
-    // outer lambda binds x of any type; we pin x:Int for this test.
-    let outer_lam = lambda(&mut b.arena, Ty::int(), inner_lam);
+    let inner_lam = lambda(&mut b.arena, body);
+    let outer_lam = lambda(&mut b.arena, inner_lam);
 
     let xs: Vec<_> = (1..=4).map(|i| b.int(i)).collect();
     let lst = b.list(xs);
@@ -280,7 +283,7 @@ fn fold_length() {
 fn unfold_range_0_to_3() {
     // unfold (λn. pair (pair n (add n 1)) (lt n 3)) 0  →  [0, 1, 2]
     let mut b = Builder::new();
-    let n = param(&mut b.arena, 0, Ty::int());
+    let n = param(&mut b.arena, 0);
     let one = b.int(1);
     let three = b.int(3);
     let add = b.pref(BuiltinId::Add);
@@ -291,8 +294,7 @@ fn unfold_range_0_to_3() {
     let inner_pair = b.ap2(pair, n, n_plus_1);
     let cont = b.ap2(lt, n, three);
     let outer_pair = b.ap2(pair, inner_pair, cont);
-    let step_body = outer_pair;
-    let step = lambda(&mut b.arena, Ty::int(), step_body);
+    let step = lambda(&mut b.arena, outer_pair);
 
     let zero = b.int(0);
     let unfold = b.pref(BuiltinId::Unfold);
@@ -307,7 +309,6 @@ fn unfold_range_0_to_3() {
 
 #[test]
 fn k_drops_second_arg() {
-    // k 7 9 = 7
     let mut b = Builder::new();
     let k = b.pref(BuiltinId::K);
     let seven = b.int(7);
@@ -318,7 +319,6 @@ fn k_drops_second_arg() {
 
 #[test]
 fn b_composes() {
-    // (b (add 1) (mul 2)) 5 = add 1 (mul 2 5) = 11
     let mut b = Builder::new();
     let bcomb = b.pref(BuiltinId::B);
     let add = b.pref(BuiltinId::Add);
@@ -335,15 +335,14 @@ fn b_composes() {
 
 #[test]
 fn length_via_fold_and_k() {
-    // length = fold (k (add 1)) 0 — works because k discards the element.
     let mut b = Builder::new();
     let k = b.pref(BuiltinId::K);
     let add = b.pref(BuiltinId::Add);
     let one = b.int(1);
     let zero = b.int(0);
     let fold = b.pref(BuiltinId::Fold);
-    let inc = b.ap(add, one); // Int -> Int
-    let cb = b.ap(k, inc);    // ∀x. x -> Int -> Int
+    let inc = b.ap(add, one);
+    let cb = b.ap(k, inc);
     let xs: Vec<_> = (1..=5).map(|i| b.int(i)).collect();
     let lst = b.list(xs);
     let prog = b.ap3(fold, cb, zero, lst);
@@ -352,7 +351,6 @@ fn length_via_fold_and_k() {
 
 #[test]
 fn head_via_fold_and_k() {
-    // head = fold k 0 — with right-fold, K picks the first element.
     let mut b = Builder::new();
     let k = b.pref(BuiltinId::K);
     let zero = b.int(0);
@@ -365,7 +363,6 @@ fn head_via_fold_and_k() {
 
 #[test]
 fn map_add_one_via_fold_b_cons() {
-    // add-one-to-each = fold (b cons (add 1)) nil
     let mut b = Builder::new();
     let bcomb = b.pref(BuiltinId::B);
     let cons = b.pref(BuiltinId::Cons);
@@ -373,8 +370,8 @@ fn map_add_one_via_fold_b_cons() {
     let one = b.int(1);
     let nil = b.pref(BuiltinId::Nil);
     let fold = b.pref(BuiltinId::Fold);
-    let inc = b.ap(add, one);              // Int -> Int
-    let cb = b.ap2(bcomb, cons, inc);      // Int -> List Int -> List Int
+    let inc = b.ap(add, one);
+    let cb = b.ap2(bcomb, cons, inc);
     let xs: Vec<_> = [1, 2, 3].iter().map(|i| b.int(*i)).collect();
     let lst = b.list(xs);
     let prog = b.ap3(fold, cb, nil, lst);
@@ -386,20 +383,23 @@ fn map_add_one_via_fold_b_cons() {
 
 #[test]
 fn user_function_add_one_program() {
-    // λx:Int. add x 1 — applied to 41 returns 42.
+    // λx. add x 1 — applied to 41 returns 42.
     let mut b = Builder::new();
-    let x = param(&mut b.arena, 0, Ty::int());
+    let x = param(&mut b.arena, 0);
     let one = b.int(1);
     let add = b.pref(BuiltinId::Add);
     let body = b.ap2(add, x, one);
-    let f = lambda(&mut b.arena, Ty::int(), body);
+    let f = lambda(&mut b.arena, body);
     assert_eq!(b.run_with(f, vec![Value::Int(41)]), Value::Int(42));
 }
 
-// --- polymorphism ------------------------------------------------------
+// --- runtime polymorphism (no static types) ----------------------------
 
 #[test]
 fn nil_can_be_used_as_int_list_or_bool_list() {
+    // Without static types, `cons 1 nil` and `cons true nil` use the same
+    // `nil` and `cons` nodes structurally — runtime polymorphism falls out
+    // of the strict-evaluation semantics.
     let mut b = Builder::new();
     let nil = b.pref(BuiltinId::Nil);
     let cons = b.pref(BuiltinId::Cons);
@@ -415,8 +415,6 @@ fn nil_can_be_used_as_int_list_or_bool_list() {
 
 #[test]
 fn shared_subexpression_evaluates_once_to_same_result() {
-    // Build the same `add 2 3` twice; assert they hash-cons to one node and
-    // the wrapping pair (a, a) evaluates to (5, 5).
     let mut b = Builder::new();
     let add = b.pref(BuiltinId::Add);
     let two = b.int(2);

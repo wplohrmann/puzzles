@@ -34,13 +34,36 @@ Candidates are generated in two passes:
    each maximal sub-tree as either *included* or *abstracted*, stopping
    abstraction at depth `D`. This yields a finite multiset of fragments.
 2. **Anti-unification across occurrences.** Group fragments that share an
-   anchor *shape* (sequence of node kinds and types modulo abstracted
-   leaves) and compute their anti-unifier: the most-specific common
-   generalisation. The anti-unifier becomes a single candidate primitive.
+   anchor *shape* (sequence of node kinds modulo abstracted leaves) and
+   compute their anti-unifier: the most-specific common generalisation.
+   The anti-unifier becomes a single candidate primitive.
 
 Concrete bounds for v0: `K = 8` (max fragment size), `D = 2` (max abstraction
 depth). These are aggressive limits but still produce thousands of
 candidates per iteration, which is what beam search wants.
+
+#### Anti-unification without static types
+
+The original design used type-driven anti-unification: holes were
+constrained by the polytypes of the sub-trees they replaced, so two
+positions with incompatible types couldn't unify into the same hole.
+Without a static type system (M2 onwards), we drop that.
+
+Two compensating signals are available at no extra cost:
+
+- **Runtime-value shape.** Every program in the replay buffer was
+  evaluated against its task's example inputs during search. The
+  `Value` variant observed at each hole position across occurrences
+  (`Int` here, `List` there, mixed both) is a coarse runtime-derived
+  type proxy. Reject candidates whose hole positions span
+  contradictory variants beyond what a primitive could plausibly
+  accept.
+- **Bottom-rate.** A candidate primitive that, when substituted back
+  into the corpus, produces `Bottom` more often than it doesn't is
+  almost certainly an over-generalised hole. Score it down.
+
+Both checks are cheap and replace the structural soundness that types
+used to provide.
 
 ### Step 2 — Score each candidate
 
@@ -107,7 +130,7 @@ pub struct AbstractionOutput {
 pub struct NewEntryAudit {
     pub name:     String,
     pub body:     NodeId,
-    pub ty:       TypeScheme,
+    pub arity:    u8,
     pub savings:  i32,
     pub occurrences_replaced: usize,
 }
@@ -118,16 +141,14 @@ human-readable audit so we can sanity-check what the system is doing. ("It
 just discovered `flip f a b = f b a`, occurrences=24, savings=47" is a much
 better debug experience than a black-box library that grew by one entry.)
 
-## Picking names and types
+## Picking names
 
 New primitives get **automatic names** like `f37` initially. A small post-
 processing step can guess better names by inspecting the body — e.g.
 "swap-args" for the obvious S-combinator-like body — but that's polish.
 
-Types are inferred from the body via the same Hindley-Milner pass `lang`
-already provides; the polytype's quantifiers come from any free type
-variables in the body, which is exactly the standard "let-generalisation"
-rule.
+There are no types to infer; the body's runtime behaviour and the
+arity (= number of holes) are all that's stored.
 
 ## Avoiding pathological libraries
 
@@ -138,9 +159,11 @@ A few guardrails worth designing in early:
   shorter name and barely worth a library slot.
 - **Cap arity** at, say, 4. Beyond that the abstractions are usually too
   specific to be reused.
-- **Reject equivalent entries**: if a candidate's body is η/β-equivalent to
-  an existing primitive (or a curried partial application of one), drop it.
-  This requires a cheap normalization pass.
+- **Reject equivalent entries**: if a candidate's body produces the
+  same runtime values as an existing primitive (or a curried partial
+  application of one) on a fixed probe-input set, drop it. (With
+  static types removed, η/β-equivalence has to be tested
+  observationally rather than structurally.)
 - **Periodic library garbage collection**: once per N abstraction sleeps,
   drop primitives whose usage in the replay buffer fell below a threshold.
   Otherwise the library accumulates dead weight from earlier domains.

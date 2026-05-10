@@ -8,21 +8,19 @@ decoupling boundary in the project, and many domains are added as new
 implementations of this single trait.
 
 ```rust
-pub trait Task: Send + Sync {
-    /// The type the program must have.
-    fn target_type(&self) -> TypeScheme;
-
-    /// True iff the program *exactly* solves the task.
+pub trait Task {
+    /// True iff the program *exactly* solves the task on every example.
     /// Most callers check this first.
-    fn solves(&self, lang: &Language, prog: &Program) -> bool;
+    fn solves(&self, arena: &Arena, lib: &Library, root: NodeId) -> bool;
 
     /// A continuous quality score in [0, 1]. Used by search heuristics that
     /// want partial credit (e.g. matched 4 of 5 examples). For a binary
     /// task this is just `solves` cast to f32.
-    fn score(&self, lang: &Language, prog: &Program) -> f32;
+    fn score(&self, arena: &Arena, lib: &Library, root: NodeId) -> f32;
 
     /// A task-specific encoding for the neural task encoder. Returned as a
     /// trait object so each domain can pick its own representation.
+    /// (Added in M4 alongside the neural recogniser; the M2 trait omits it.)
     fn encoding(&self) -> Box<dyn TaskEncoding>;
 
     /// Deterministic id (e.g. for replay logs).
@@ -30,8 +28,13 @@ pub trait Task: Send + Sync {
 }
 ```
 
-`Language` here is a small handle over the arena + library + interpreter,
-not a separate world.
+There is no `target_type` — the language has no static type system
+(see `01-language.md`). Solution detection uses runtime
+value-equality, which is sound because `Value::PartialEq` is
+type-strict.
+
+`Send + Sync` are *not* bound: `Value` holds `Rc`s and is `!Send`.
+Parallel-task evaluation requires moving `Value` to `Arc` first.
 
 ## Task families
 
@@ -44,14 +47,22 @@ The task gives `n` (input, output) pairs. The program must be a function
 
 ```rust
 pub struct ListExamplesTask {
+    pub id: TaskId,
     pub examples: Vec<(Value, Value)>,
     pub fuel: u32,
 }
 
 impl Task for ListExamplesTask {
-    fn solves(&self, l: &Language, p: &Program) -> bool {
-        self.examples.iter().all(|(x, y)|
-            l.eval(p, &[x.clone()], self.fuel) == *y)
+    fn score(&self, arena: &Arena, lib: &Library, root: NodeId) -> f32 {
+        let mut hits = 0;
+        for (x, y) in &self.examples {
+            let mut fuel = self.fuel;
+            match eval(arena, lib, root, &[x.clone()], &mut fuel) {
+                Ok(v) if !v.is_bottom() && &v == y => hits += 1,
+                _ => {}
+            }
+        }
+        hits as f32 / self.examples.len() as f32
     }
     /* ... */
 }

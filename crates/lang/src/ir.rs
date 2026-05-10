@@ -1,13 +1,16 @@
 //! Internal representation: nodes, kinds, literal values.
+//!
+//! There is no static type system: nodes carry only structural
+//! information (kind + children). Types are runtime concepts, encoded by
+//! the `Value` variants in `eval.rs`. Primitives that receive
+//! mismatched runtime types return `Value::Bottom` rather than failing
+//! at construction.
 
 use serde::{Deserialize, Serialize};
 
 use crate::library::PrimId;
-use crate::ty::Ty;
 
-/// Literal values storable in the program. Float is included now even
-/// though we don't use it in the v0 task suite — having it here means we
-/// don't have to revisit the IR when we add floats later.
+/// Literal values storable in the program.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum LitValue {
     Int(i64),
@@ -28,25 +31,14 @@ impl std::hash::Hash for LitValue {
     }
 }
 
-impl LitValue {
-    pub fn ty(&self) -> Ty {
-        match self {
-            LitValue::Int(_) => Ty::int(),
-            LitValue::Bool(_) => Ty::bool(),
-            LitValue::Float(_) => Ty::float(),
-            LitValue::Char(_) => Ty::char(),
-        }
-    }
-}
-
 /// Node kinds. Children of `Lambda`/`App` are `NodeId`s into the same arena.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NodeKind {
     Literal(LitValue),
     /// de-Bruijn-indexed parameter. `index = 0` is the innermost lambda's
-    /// parameter; `index = N` reaches `N` lambdas outward.
+    /// parameter; index `N` reaches `N` lambdas outward.
     Param { index: u16 },
-    Lambda { param_ty: Ty, body: NodeId },
+    Lambda { body: NodeId },
     App { func: NodeId, arg: NodeId },
     PrimRef(PrimId),
 }
@@ -62,7 +54,6 @@ impl NodeId {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Node {
     pub kind: NodeKind,
-    pub ty: Ty,
     /// Structural hash for the intern table.
     pub hash: u64,
 }

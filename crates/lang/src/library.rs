@@ -4,14 +4,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::arena::NodeId;
 use crate::builtin::BuiltinId;
-use crate::ty::TypeScheme;
 
 pub type PrimId = u32;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Primitive {
     pub name: String,
-    pub ty: TypeScheme,
+    /// Number of curried arguments before the primitive executes.
+    pub arity: u8,
     pub kind: PrimKind,
 }
 
@@ -40,14 +40,7 @@ impl Library {
     pub fn get(&self, id: PrimId) -> &Primitive { &self.primitives[id as usize] }
 
     pub fn arity(&self, id: PrimId) -> usize {
-        // Arity = number of leading function arrows in the polytype body.
-        let mut t = &self.primitives[id as usize].ty.body;
-        let mut a = 0;
-        while let Some((_, ret)) = t.as_func() {
-            a += 1;
-            t = ret;
-        }
-        a
+        self.primitives[id as usize].arity as usize
     }
 
     pub fn lookup(&self, name: &str) -> Option<PrimId> {

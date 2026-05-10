@@ -1,5 +1,15 @@
 # Milestone 2 design decisions
 
+> **⚠️ Partially superseded.** Several decisions in this doc were
+> overturned mid-M2 by the deletion of the static type system. See
+> [m2-strip-static-types.md](./m2-strip-static-types.md) for the
+> details. Specifically: §5 (tycon filter), §8 (root-tycon
+> pre-filter), §3 (in part — apply construction no longer fails),
+> and the type-aware extended obs-eq formulation in §4 are all
+> obsolete. The §1 (acceptance task list) and §6 (reverse iteration)
+> material still applies; the §10 performance numbers were measured
+> under the now-deleted typed regime.
+
 A log of every non-obvious decision made while implementing the `tasks`
 crate, the `search` crate, and the M1 patches that M2 depended on. Each
 is reversible — call any of these out and we'll change them.

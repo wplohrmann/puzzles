@@ -1,9 +1,12 @@
-//! Built-in primitives: their identity, types, and a helper to seed a Library.
+//! Built-in primitives: their identity, arity, and a helper to seed a Library.
+//!
+//! Without a static type system, primitives carry only an `arity`. Type
+//! mismatches at runtime (e.g. `add` applied to a `Bool`) surface as
+//! `Value::Bottom` from the evaluator.
 
 use serde::{Deserialize, Serialize};
 
 use crate::library::{Library, PrimKind, Primitive};
-use crate::ty::{Ty, TypeScheme};
 
 /// Built-in primitive identifier. Kept stable so serialised programs from
 /// older versions still resolve correctly.
@@ -15,7 +18,7 @@ pub enum BuiltinId {
 
     // Boolean
     Not, And, Or,
-    /// `if : forall a. Bool -> a -> a -> a`
+    /// `if cond then else` — lazy in the unchosen branch.
     If,
 
     // Pair
@@ -23,16 +26,17 @@ pub enum BuiltinId {
 
     // List
     Nil, Cons,
-    /// `fold : forall a b. (a -> b -> b) -> b -> List a -> b`
-    /// Right-fold semantics: `fold f z [a,b,c] = f a (f b (f c z))`.
+    /// Right-fold: `fold f z [a,b,c] = f a (f b (f c z))`.
     Fold,
-    /// `unfold : forall a b. (b -> Pair (Pair a b) Bool) -> b -> List a`
+    /// `unfold step seed` — generates a list by repeatedly calling
+    /// `step` on the running seed; stops when the second component of
+    /// the returned pair is `false`.
     Unfold,
 
     // Combinators
-    /// `k : forall a b. a -> b -> a` — the K combinator (`λx y. x`).
+    /// `K x y = x`
     K,
-    /// `b : forall a b c. (b -> c) -> (a -> b) -> a -> c` — composition.
+    /// `B f g x = f (g x)`
     B,
 }
 
@@ -61,107 +65,26 @@ impl BuiltinId {
         }
     }
 
-    pub fn ty(self) -> TypeScheme {
+    pub fn arity(self) -> u8 {
         match self {
-            // Int -> Int -> Int
-            BuiltinId::Add | BuiltinId::Sub | BuiltinId::Mul | BuiltinId::Div => {
-                TypeScheme::mono(Ty::func_chain(&[Ty::int(), Ty::int()], Ty::int()))
-            }
-            // Int -> Int -> Bool
-            BuiltinId::Lt | BuiltinId::Eq => {
-                TypeScheme::mono(Ty::func_chain(&[Ty::int(), Ty::int()], Ty::bool()))
-            }
-            // Bool -> Bool
-            BuiltinId::Not => TypeScheme::mono(Ty::func(Ty::bool(), Ty::bool())),
-            // Bool -> Bool -> Bool
-            BuiltinId::And | BuiltinId::Or => {
-                TypeScheme::mono(Ty::func_chain(&[Ty::bool(), Ty::bool()], Ty::bool()))
-            }
-            // forall a. Bool -> a -> a -> a
-            BuiltinId::If => TypeScheme::forall(
-                vec![0],
-                Ty::func_chain(&[Ty::bool(), Ty::Var(0), Ty::Var(0)], Ty::Var(0)),
-            ),
-            // forall a b. a -> b -> Pair a b
-            BuiltinId::Pair => TypeScheme::forall(
-                vec![0, 1],
-                Ty::func_chain(
-                    &[Ty::Var(0), Ty::Var(1)],
-                    Ty::pair(Ty::Var(0), Ty::Var(1)),
-                ),
-            ),
-            // forall a b. Pair a b -> a
-            BuiltinId::Fst => TypeScheme::forall(
-                vec![0, 1],
-                Ty::func(Ty::pair(Ty::Var(0), Ty::Var(1)), Ty::Var(0)),
-            ),
-            // forall a b. Pair a b -> b
-            BuiltinId::Snd => TypeScheme::forall(
-                vec![0, 1],
-                Ty::func(Ty::pair(Ty::Var(0), Ty::Var(1)), Ty::Var(1)),
-            ),
-            // forall a. List a
-            BuiltinId::Nil => TypeScheme::forall(vec![0], Ty::list(Ty::Var(0))),
-            // forall a. a -> List a -> List a
-            BuiltinId::Cons => TypeScheme::forall(
-                vec![0],
-                Ty::func_chain(
-                    &[Ty::Var(0), Ty::list(Ty::Var(0))],
-                    Ty::list(Ty::Var(0)),
-                ),
-            ),
-            // forall a b. (a -> b -> b) -> b -> List a -> b
-            BuiltinId::Fold => TypeScheme::forall(
-                vec![0, 1],
-                Ty::func_chain(
-                    &[
-                        Ty::func_chain(&[Ty::Var(0), Ty::Var(1)], Ty::Var(1)),
-                        Ty::Var(1),
-                        Ty::list(Ty::Var(0)),
-                    ],
-                    Ty::Var(1),
-                ),
-            ),
-            // forall a b. (b -> Pair (Pair a b) Bool) -> b -> List a
-            BuiltinId::Unfold => TypeScheme::forall(
-                vec![0, 1],
-                Ty::func_chain(
-                    &[
-                        Ty::func(
-                            Ty::Var(1),
-                            Ty::pair(
-                                Ty::pair(Ty::Var(0), Ty::Var(1)),
-                                Ty::bool(),
-                            ),
-                        ),
-                        Ty::Var(1),
-                    ],
-                    Ty::list(Ty::Var(0)),
-                ),
-            ),
-            // forall a b. a -> b -> a
-            BuiltinId::K => TypeScheme::forall(
-                vec![0, 1],
-                Ty::func_chain(&[Ty::Var(0), Ty::Var(1)], Ty::Var(0)),
-            ),
-            // forall a b c. (b -> c) -> (a -> b) -> a -> c
-            BuiltinId::B => TypeScheme::forall(
-                vec![0, 1, 2],
-                Ty::func_chain(
-                    &[
-                        Ty::func(Ty::Var(1), Ty::Var(2)),
-                        Ty::func(Ty::Var(0), Ty::Var(1)),
-                        Ty::Var(0),
-                    ],
-                    Ty::Var(2),
-                ),
-            ),
+            BuiltinId::Add | BuiltinId::Sub | BuiltinId::Mul | BuiltinId::Div => 2,
+            BuiltinId::Lt | BuiltinId::Eq => 2,
+            BuiltinId::Not => 1,
+            BuiltinId::And | BuiltinId::Or => 2,
+            BuiltinId::If => 3,
+            BuiltinId::Pair => 2,
+            BuiltinId::Fst | BuiltinId::Snd => 1,
+            BuiltinId::Nil => 0,
+            BuiltinId::Cons => 2,
+            BuiltinId::Fold => 3,
+            BuiltinId::Unfold => 2,
+            BuiltinId::K => 2,
+            BuiltinId::B => 3,
         }
     }
 }
 
-/// All built-ins, in a stable order. Index in this slice doubles as the
-/// `PrimId` if you populate a fresh library with `seed_builtin_library`.
+/// All built-ins, in a stable order.
 pub const ALL_BUILTINS: &[BuiltinId] = &[
     BuiltinId::Add,
     BuiltinId::Sub,
@@ -190,7 +113,7 @@ pub fn seed_builtin_library() -> Library {
     for &b in ALL_BUILTINS {
         lib.add(Primitive {
             name: b.name().to_string(),
-            ty: b.ty(),
+            arity: b.arity(),
             kind: PrimKind::Builtin(b),
         });
     }
@@ -200,7 +123,6 @@ pub fn seed_builtin_library() -> Library {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::library::Library;
 
     #[test]
     fn seed_lib_contains_all_builtins() {
@@ -224,13 +146,5 @@ mod tests {
         assert_eq!(lib.arity(lib.lookup("not").unwrap()), 1);
         assert_eq!(lib.arity(lib.lookup("k").unwrap()), 2);
         assert_eq!(lib.arity(lib.lookup("b").unwrap()), 3);
-    }
-
-    #[test]
-    fn nil_is_polymorphic() {
-        let lib = Library::default();
-        let _ = lib;
-        let scheme = BuiltinId::Nil.ty();
-        assert_eq!(scheme.n_vars, 1);
     }
 }

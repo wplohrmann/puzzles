@@ -6,9 +6,10 @@
 //! unused positions.
 //!
 //! `Value::Bottom` propagates through evaluation and represents a runtime
-//! failure (e.g. `head []`, `div 1 0`). It is *not* an `Error`. Errors
-//! signal type errors (which shouldn't happen for well-typed programs) or
-//! out-of-fuel.
+//! failure (e.g. `head []`, `div 1 0`, `add (Bool) (Int)`). It is *not*
+//! an `Error` — `Error` signals out-of-fuel or a structurally invalid
+//! program (a `Param` index that escapes its lambda). Type mismatches in
+//! primitives produce `Bottom`.
 
 use std::rc::Rc;
 
@@ -18,9 +19,8 @@ use crate::error::{Error, Result};
 use crate::ir::{LitValue, NodeKind};
 use crate::library::{Library, PrimId, PrimKind};
 
-/// Runtime values. Not serde-serialisable directly because closures hold
-/// arena `NodeId`s; round-trip serialisation operates on programs, not
-/// values.
+/// Runtime values. The "type" of a node is encoded in which variant of
+/// `Value` it produces — there is no separate static type.
 #[derive(Clone, Debug)]
 pub enum Value {
     Int(i64),
@@ -107,7 +107,7 @@ pub fn eval(
             }
             Ok(env[env.len() - 1 - i].clone())
         }
-        NodeKind::Lambda { body, .. } => Ok(Value::Closure(Closure {
+        NodeKind::Lambda { body } => Ok(Value::Closure(Closure {
             head: ClosureHead::Lambda { body: *body, captured_env: env.to_vec() },
             args: Vec::new(),
             arity: 1,
@@ -120,7 +120,7 @@ pub fn eval(
                     Value::Bool(true) => eval(arena, lib, then_n, env, fuel),
                     Value::Bool(false) => eval(arena, lib, else_n, env, fuel),
                     Value::Bottom(s) => Ok(Value::Bottom(s)),
-                    _ => Err(Error::PrimitiveTypeMismatch("if")),
+                    _ => Ok(Value::bottom("if: cond not Bool")),
                 };
             }
             let f = eval(arena, lib, *func, env, fuel)?;
@@ -151,7 +151,7 @@ pub fn apply(
     if let Value::Bottom(s) = arg { return Ok(Value::Bottom(s)); }
     let (head, mut args, arity) = match f {
         Value::Closure(Closure { head, args, arity }) => (head, args, arity),
-        _ => return Err(Error::PrimitiveTypeMismatch("apply: function value required")),
+        _ => return Ok(Value::bottom("apply: non-function value")),
     };
     args.push(arg);
     if args.len() < arity {
@@ -160,7 +160,6 @@ pub fn apply(
         match head {
             ClosureHead::Prim(p) => exec_prim(p, args, arena, lib, fuel),
             ClosureHead::Lambda { body, mut captured_env } => {
-                // arity is 1 for lambdas, so args has exactly one element.
                 captured_env.extend(args);
                 eval(arena, lib, body, &captured_env, fuel)
             }
@@ -168,9 +167,7 @@ pub fn apply(
     }
 }
 
-/// Evaluate a complete program with a list of arguments. `eval_program(p, [])`
-/// runs a value-typed program; `eval_program(p, [a, b])` runs a 2-arg
-/// curried function.
+/// Evaluate a complete program with a list of arguments.
 pub fn eval_program(
     arena: &Arena, lib: &Library,
     root: NodeId, args: Vec<Value>, fuel: u32,
@@ -193,7 +190,6 @@ fn exec_prim(
     match &prim.kind {
         PrimKind::Builtin(b) => exec_builtin(*b, args, arena, lib, fuel),
         PrimKind::Learned { body, .. } => {
-            // Run the learned body and apply args.
             let mut v = eval(arena, lib, *body, &[], fuel)?;
             for a in args {
                 v = apply(arena, lib, v, a, fuel)?;
@@ -224,10 +220,8 @@ fn exec_builtin(
 
     match b {
         Add | Sub | Mul => {
-            let a = args[0].as_int().ok_or(Error::PrimitiveTypeMismatch(b.name()))?;
-            let c = args[1].as_int().ok_or(Error::PrimitiveTypeMismatch(b.name()))?;
-            // Wrapping arithmetic so overflow is total. Programs that care
-            // about overflow can guard with `lt` etc.
+            let a = match args[0].as_int() { Some(v) => v, None => return Ok(Value::bottom("add/sub/mul: non-Int")) };
+            let c = match args[1].as_int() { Some(v) => v, None => return Ok(Value::bottom("add/sub/mul: non-Int")) };
             let r = match b {
                 Add => a.wrapping_add(c),
                 Sub => a.wrapping_sub(c),
@@ -237,30 +231,33 @@ fn exec_builtin(
             Ok(Value::Int(r))
         }
         Div => {
-            let a = args[0].as_int().ok_or(Error::PrimitiveTypeMismatch("div"))?;
-            let c = args[1].as_int().ok_or(Error::PrimitiveTypeMismatch("div"))?;
+            let a = match args[0].as_int() { Some(v) => v, None => return Ok(Value::bottom("div: non-Int")) };
+            let c = match args[1].as_int() { Some(v) => v, None => return Ok(Value::bottom("div: non-Int")) };
             if c == 0 { return Ok(Value::bottom("div by zero")); }
             Ok(Value::Int(a / c))
         }
         Lt => {
-            let a = args[0].as_int().ok_or(Error::PrimitiveTypeMismatch("lt"))?;
-            let c = args[1].as_int().ok_or(Error::PrimitiveTypeMismatch("lt"))?;
+            let a = match args[0].as_int() { Some(v) => v, None => return Ok(Value::bottom("lt: non-Int")) };
+            let c = match args[1].as_int() { Some(v) => v, None => return Ok(Value::bottom("lt: non-Int")) };
             Ok(Value::Bool(a < c))
         }
         Eq => {
-            let a = args[0].as_int().ok_or(Error::PrimitiveTypeMismatch("eq"))?;
-            let c = args[1].as_int().ok_or(Error::PrimitiveTypeMismatch("eq"))?;
+            let a = match args[0].as_int() { Some(v) => v, None => return Ok(Value::bottom("eq: non-Int")) };
+            let c = match args[1].as_int() { Some(v) => v, None => return Ok(Value::bottom("eq: non-Int")) };
             Ok(Value::Bool(a == c))
         }
-        Not => Ok(Value::Bool(!args[0].as_bool().ok_or(Error::PrimitiveTypeMismatch("not"))?)),
+        Not => match args[0].as_bool() {
+            Some(b) => Ok(Value::Bool(!b)),
+            None => Ok(Value::bottom("not: non-Bool")),
+        },
         And => {
-            let a = args[0].as_bool().ok_or(Error::PrimitiveTypeMismatch("and"))?;
-            let c = args[1].as_bool().ok_or(Error::PrimitiveTypeMismatch("and"))?;
+            let a = match args[0].as_bool() { Some(v) => v, None => return Ok(Value::bottom("and: non-Bool")) };
+            let c = match args[1].as_bool() { Some(v) => v, None => return Ok(Value::bottom("and: non-Bool")) };
             Ok(Value::Bool(a && c))
         }
         Or => {
-            let a = args[0].as_bool().ok_or(Error::PrimitiveTypeMismatch("or"))?;
-            let c = args[1].as_bool().ok_or(Error::PrimitiveTypeMismatch("or"))?;
+            let a = match args[0].as_bool() { Some(v) => v, None => return Ok(Value::bottom("or: non-Bool")) };
+            let c = match args[1].as_bool() { Some(v) => v, None => return Ok(Value::bottom("or: non-Bool")) };
             Ok(Value::Bool(a || c))
         }
         If => {
@@ -271,24 +268,24 @@ fn exec_builtin(
                 Value::Bool(true) => Ok(args[1].clone()),
                 Value::Bool(false) => Ok(args[2].clone()),
                 Value::Bottom(s) => Ok(Value::Bottom(s.clone())),
-                _ => Err(Error::PrimitiveTypeMismatch("if")),
+                _ => Ok(Value::bottom("if: cond not Bool")),
             }
         }
         Pair => Ok(Value::pair(args[0].clone(), args[1].clone())),
         Fst => match &args[0] {
             Value::Pair(p) => Ok(p.0.clone()),
-            _ => Err(Error::PrimitiveTypeMismatch("fst")),
+            _ => Ok(Value::bottom("fst: non-Pair")),
         },
         Snd => match &args[0] {
             Value::Pair(p) => Ok(p.1.clone()),
-            _ => Err(Error::PrimitiveTypeMismatch("snd")),
+            _ => Ok(Value::bottom("snd: non-Pair")),
         },
         Nil => Ok(Value::nil()),
         Cons => {
             let h = args[0].clone();
             let t = match &args[1] {
                 Value::List(xs) => xs.clone(),
-                _ => return Err(Error::PrimitiveTypeMismatch("cons")),
+                _ => return Ok(Value::bottom("cons: tail not List")),
             };
             let mut out = Vec::with_capacity(t.len() + 1);
             out.push(h);
@@ -297,13 +294,11 @@ fn exec_builtin(
         }
         Fold => {
             // Right-fold: fold f z [a,b,c] = f a (f b (f c z)).
-            // Implemented iteratively by walking the list right-to-left and
-            // computing acc' = f x acc at each step.
             let f = args[0].clone();
             let z = args[1].clone();
             let xs = match &args[2] {
                 Value::List(xs) => xs.clone(),
-                _ => return Err(Error::PrimitiveTypeMismatch("fold")),
+                _ => return Ok(Value::bottom("fold: arg 3 not List")),
             };
             let mut acc = z;
             for x in xs.iter().rev() {
@@ -315,7 +310,6 @@ fn exec_builtin(
             Ok(acc)
         }
         Unfold => {
-            // unfold step seed
             let step = args[0].clone();
             let mut seed = args[1].clone();
             let mut out: Vec<Value> = Vec::new();
@@ -326,36 +320,29 @@ fn exec_builtin(
                 let outer = match r {
                     Value::Pair(p) => p,
                     Value::Bottom(s) => return Ok(Value::Bottom(s)),
-                    _ => return Err(Error::PrimitiveTypeMismatch("unfold")),
+                    _ => return Ok(Value::bottom("unfold: step did not return Pair")),
                 };
                 let cont = match &outer.1 {
                     Value::Bool(b) => *b,
                     Value::Bottom(s) => return Ok(Value::Bottom(s.clone())),
-                    _ => return Err(Error::PrimitiveTypeMismatch("unfold")),
+                    _ => return Ok(Value::bottom("unfold: continuation not Bool")),
                 };
                 if !cont { break; }
                 let inner = match &outer.0 {
                     Value::Pair(p) => (p.0.clone(), p.1.clone()),
                     Value::Bottom(s) => return Ok(Value::Bottom(s.clone())),
-                    _ => return Err(Error::PrimitiveTypeMismatch("unfold")),
+                    _ => return Ok(Value::bottom("unfold: inner not Pair")),
                 };
                 out.push(inner.0);
                 seed = inner.1;
-                // Cap: bail before runaway loops produce massive lists. The
-                // outer fuel will eventually trigger, but a soft cap on list
-                // length is friendlier in tests.
                 if out.len() > 100_000 {
                     return Ok(Value::bottom("unfold: list too long"));
                 }
             }
             Ok(Value::list_from(out))
         }
-        K => {
-            // K x y = x
-            Ok(args[0].clone())
-        }
+        K => Ok(args[0].clone()),
         B => {
-            // B f g x = f (g x)
             let f = args[0].clone();
             let g = args[1].clone();
             let x = args[2].clone();
@@ -367,7 +354,6 @@ fn exec_builtin(
 
 // -- Lazy if helper -------------------------------------------------------
 
-/// If `node` looks like `if cond then else`, return the three sub-nodes.
 fn unwrap_if(
     arena: &Arena, lib: &Library, node: NodeId,
 ) -> Option<(NodeId, NodeId, NodeId)> {

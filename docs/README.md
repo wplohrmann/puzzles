@@ -25,3 +25,4 @@ previous milestone left off.
 
 - [decisions/m1-lang.md](./decisions/m1-lang.md) — `lang` crate.
 - [decisions/m2-search-tasks.md](./decisions/m2-search-tasks.md) — `tasks` and `search`.
+- [decisions/m2-strip-static-types.md](./decisions/m2-strip-static-types.md) — mid-M2 deletion of the static type system.

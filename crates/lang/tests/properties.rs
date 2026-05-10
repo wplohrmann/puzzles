@@ -6,7 +6,6 @@ use lang::builtin::seed_builtin_library;
 use lang::construct::{app, lit, prim_ref};
 use lang::eval::{eval_program, Value};
 use lang::ir::LitValue;
-use lang::ty::TyVarGen;
 
 use proptest::prelude::*;
 
@@ -30,38 +29,40 @@ proptest! {
         prop_assert_ne!(id1, id2);
     }
 
-    /// Building `add a b` always type-checks and returns Int.
+    /// Building `add a b` evaluates to the wrapping integer sum.
     #[test]
     fn add_well_typed(a in any::<i64>(), b in any::<i64>()) {
         let lib = seed_builtin_library();
         let mut arena = Arena::new();
-        let mut gen = TyVarGen::new();
         let na = lit(&mut arena, LitValue::Int(a));
         let nb = lit(&mut arena, LitValue::Int(b));
         let add = prim_ref(&mut arena, &lib, lib.lookup("add").unwrap());
-        let app1 = app(&mut arena, &mut gen, add, na).unwrap();
-        let prog = app(&mut arena, &mut gen, app1, nb).unwrap();
+        let app1 = app(&mut arena, add, na);
+        let prog = app(&mut arena, app1, nb);
         let v = eval_program(&arena, &lib, prog, vec![], 1_000).unwrap();
         prop_assert_eq!(v, Value::Int(a.wrapping_add(b)));
     }
 
-    /// `add` applied to a Bool fails at construction time.
+    /// `add` applied to a Bool now constructs successfully (no static
+    /// type-check) and surfaces as Bottom at runtime.
     #[test]
-    fn add_with_bool_arg_rejected(b in any::<bool>()) {
+    fn add_with_bool_yields_bottom(b in any::<bool>()) {
         let lib = seed_builtin_library();
         let mut arena = Arena::new();
-        let mut gen = TyVarGen::new();
         let nb = lit(&mut arena, LitValue::Bool(b));
+        let one = lit(&mut arena, LitValue::Int(1));
         let add = prim_ref(&mut arena, &lib, lib.lookup("add").unwrap());
-        let r = app(&mut arena, &mut gen, add, nb);
-        prop_assert!(r.is_err());
+        let app1 = app(&mut arena, add, nb);
+        let prog = app(&mut arena, app1, one);
+        let v = eval_program(&arena, &lib, prog, vec![], 1_000).unwrap();
+        prop_assert!(v.is_bottom());
     }
 
     /// Building the same fold-sum-list expression twice yields the same id.
     #[test]
     fn fold_sum_intern_idempotent(xs in proptest::collection::vec(-100i64..=100, 0..=10)) {
         let lib = seed_builtin_library();
-        let build = |arena: &mut Arena, gen: &mut TyVarGen| {
+        let build = |arena: &mut Arena| {
             let nil = prim_ref(arena, &lib, lib.lookup("nil").unwrap());
             let cons = prim_ref(arena, &lib, lib.lookup("cons").unwrap());
             let add = prim_ref(arena, &lib, lib.lookup("add").unwrap());
@@ -69,18 +70,17 @@ proptest! {
             let mut list = nil;
             for &i in xs.iter().rev() {
                 let n = lit(arena, LitValue::Int(i));
-                let c = app(arena, gen, cons, n).unwrap();
-                list = app(arena, gen, c, list).unwrap();
+                let c = app(arena, cons, n);
+                list = app(arena, c, list);
             }
             let zero = lit(arena, LitValue::Int(0));
-            let f1 = app(arena, gen, fold, add).unwrap();
-            let f2 = app(arena, gen, f1, zero).unwrap();
-            app(arena, gen, f2, list).unwrap()
+            let f1 = app(arena, fold, add);
+            let f2 = app(arena, f1, zero);
+            app(arena, f2, list)
         };
         let mut arena = Arena::new();
-        let mut gen = TyVarGen::new();
-        let id1 = build(&mut arena, &mut gen);
-        let id2 = build(&mut arena, &mut gen);
+        let id1 = build(&mut arena);
+        let id2 = build(&mut arena);
         prop_assert_eq!(id1, id2);
     }
 
@@ -89,7 +89,6 @@ proptest! {
     fn fold_sum_is_correct(xs in proptest::collection::vec(-100i64..=100, 0..=20)) {
         let lib = seed_builtin_library();
         let mut arena = Arena::new();
-        let mut gen = TyVarGen::new();
         let nil = prim_ref(&mut arena, &lib, lib.lookup("nil").unwrap());
         let cons = prim_ref(&mut arena, &lib, lib.lookup("cons").unwrap());
         let add = prim_ref(&mut arena, &lib, lib.lookup("add").unwrap());
@@ -97,13 +96,13 @@ proptest! {
         let mut list = nil;
         for &i in xs.iter().rev() {
             let n = lit(&mut arena, LitValue::Int(i));
-            let c = app(&mut arena, &mut gen, cons, n).unwrap();
-            list = app(&mut arena, &mut gen, c, list).unwrap();
+            let c = app(&mut arena, cons, n);
+            list = app(&mut arena, c, list);
         }
         let zero = lit(&mut arena, LitValue::Int(0));
-        let f1 = app(&mut arena, &mut gen, fold, add).unwrap();
-        let f2 = app(&mut arena, &mut gen, f1, zero).unwrap();
-        let prog = app(&mut arena, &mut gen, f2, list).unwrap();
+        let f1 = app(&mut arena, fold, add);
+        let f2 = app(&mut arena, f1, zero);
+        let prog = app(&mut arena, f2, list);
         let v = eval_program(&arena, &lib, prog, vec![], 100_000).unwrap();
         let expected: i64 = xs.iter().fold(0i64, |a, b| a.wrapping_add(*b));
         prop_assert_eq!(v, Value::Int(expected));
@@ -115,12 +114,11 @@ proptest! {
     fn round_trip_eval_equal(a in -1000i64..=1000, b in -1000i64..=1000) {
         let lib = seed_builtin_library();
         let mut arena = Arena::new();
-        let mut gen = TyVarGen::new();
         let na = lit(&mut arena, LitValue::Int(a));
         let nb = lit(&mut arena, LitValue::Int(b));
         let add = prim_ref(&mut arena, &lib, lib.lookup("add").unwrap());
-        let app1 = app(&mut arena, &mut gen, add, na).unwrap();
-        let prog = app(&mut arena, &mut gen, app1, nb).unwrap();
+        let app1 = app(&mut arena, add, na);
+        let prog = app(&mut arena, app1, nb);
         let v1 = eval_program(&arena, &lib, prog, vec![], 1_000).unwrap();
 
         let repr = lang::serial::serialize(&arena, prog);
@@ -135,17 +133,15 @@ proptest! {
     fn topo_order_invariant(a in -100i64..=100, b in -100i64..=100, c in -100i64..=100) {
         let lib = seed_builtin_library();
         let mut arena = Arena::new();
-        let mut gen = TyVarGen::new();
         let na = lit(&mut arena, LitValue::Int(a));
         let nb = lit(&mut arena, LitValue::Int(b));
         let nc = lit(&mut arena, LitValue::Int(c));
         let add = prim_ref(&mut arena, &lib, lib.lookup("add").unwrap());
         let mul = prim_ref(&mut arena, &lib, lib.lookup("mul").unwrap());
-        // (a + b) * c
-        let app1 = app(&mut arena, &mut gen, add, na).unwrap();
-        let sum = app(&mut arena, &mut gen, app1, nb).unwrap();
-        let app2 = app(&mut arena, &mut gen, mul, sum).unwrap();
-        let prog = app(&mut arena, &mut gen, app2, nc).unwrap();
+        let app1 = app(&mut arena, add, na);
+        let sum = app(&mut arena, app1, nb);
+        let app2 = app(&mut arena, mul, sum);
+        let prog = app(&mut arena, app2, nc);
 
         let topo = arena.reachable_topo(prog);
         let mut seen = std::collections::HashSet::new();
@@ -156,8 +152,6 @@ proptest! {
             }
             seen.insert(*id);
         }
-        // also: root is last
         prop_assert_eq!(*topo.last().unwrap(), prog);
     }
 }
-

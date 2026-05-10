@@ -60,20 +60,18 @@ pub trait ActionEnumerator {
 
 For a state with `m` pool nodes:
 
-- **Literals**: a small fixed seed set of literal proposals per type
-  (`-1, 0, 1, true, false, [], '\n', ...`) plus a *value-copy* proposal
-  stream — every distinct value that appears in the task's example
-  inputs/outputs. Roughly tens of candidates total.
-- **Primitive refs**: every primitive whose polytype is admissible. Roughly
-  the size of the library.
-- **Apply**: every `(f, a)` pair where `f`'s argument type unifies with
-  `a`'s type. This is `O(m²)` in the worst case but heavily pruned by
-  typing — typically a few hundred candidates even for `m = 30` because
-  most type pairs don't unify.
+- **Literals**: a small fixed seed set (`0, 1, true, false, [], …`)
+  plus a *value-copy* proposal stream — every distinct value that
+  appears in the task's example inputs/outputs.
+- **Primitive refs**: every primitive in the library.
+- **Apply**: every `(f, a)` pair from the pool. The language has no
+  static type system (see `01-language.md`), so construction always
+  succeeds; mismatched pairs surface as `Value::Bottom` at evaluation
+  time and are dropped via `drop_all_bottom` or collapsed via
+  observational-equivalence dedup.
 
-Critically, every candidate is type-checked at enumeration time, and any
-candidate whose hash already exists in the pool is filtered out (the pool
-is hash-cons-canonical, so structural duplicates are zero-cost to detect).
+Hash-cons-canonical pool: any candidate whose `NodeId` already exists
+is filtered out at zero cost.
 
 ## Scoring candidates
 
@@ -106,10 +104,12 @@ return None
 
 Notes:
 
-- "Solution check" is a free side-effect of evaluating each candidate. The
-  moment a candidate has the goal type and its values match the targets on
-  every example, we're done. This is the bottom-up design's biggest single
-  ergonomic win over top-down.
+- "Solution check" is a free side-effect of evaluating each candidate.
+  The moment a candidate's runtime values match the task's expected
+  outputs on every example, we're done. (`Value::PartialEq` is
+  type-strict, so value-equality alone is sufficient — there's no
+  need for a separate type check.) This is the bottom-up design's
+  biggest single ergonomic win over top-down.
 - We do not call the value head every step; reserved for MCTS or for "give
   up" pruning.
 - The size penalty `α · |pool|` enforces the MDL prior at search time.
@@ -162,23 +162,32 @@ pub struct TrajectoryStep {
 `training` ingests these to train the network — see
 [06-training.md](./06-training.md).
 
-## Type-driven pruning beyond Apply
+## Pruning beyond Apply
 
-Two more aggressive pruners we'll layer in once the basic version works:
+The M2 search already ships:
 
-- **Reachability**: drop any candidate whose result type can't, via the
-  available primitives, reach the goal type within the remaining budget.
-  Computed offline as a small graph reachability table over types.
-- **Value-redundancy**: drop any candidate whose values on the task's
-  examples are pairwise-equal to a node already in the pool of the same
-  type. This is exactly BUSTLE's "observational equivalence" pruning and
-  is one of the largest practical speedups available — it deduplicates
-  nodes that *behave* the same on this task even if they're structurally
-  different.
+- **Observational equivalence** over runtime values. Two candidates
+  whose stored value tuples match (across all task examples) collapse
+  to one pool entry — exactly BUSTLE's "obs-eq" prune. This is the
+  largest practical speedup available without a neural prior.
+- **Probe-based obs-eq** for closure-typed candidates: apply each
+  closure to its corresponding example input and dedup on the result.
+  Soundness caveat documented in `decisions/m2-search-tasks.md` §4
+  and `decisions/m2-strip-static-types.md`.
+- **`drop_all_bottom`**: any candidate whose runtime values are all
+  `Bottom` is skipped (it can't be a solution and can't usefully
+  compose).
+- **Closure-as-`f` prefilter**: any pool entry whose values contain
+  no closure is skipped as an `f`-side App argument (applying a
+  non-function produces `Bottom`).
 
-The second pruner, in particular, is task-specific (different tasks
-discriminate between different programs), so it lives in `search`, not
-`lang`.
+A future addition once the system has actually run on more tasks:
+
+- **Reachability**: drop any candidate whose runtime *value shape*
+  can't reach the expected output shape within the remaining budget.
+  This is the value-level analogue of the type-reachability prune we
+  considered in the typed regime; needs empirical data on which
+  shape transformations the primitive set can perform.
 
 ## Parallelism
 

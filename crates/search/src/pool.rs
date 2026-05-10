@@ -1,25 +1,25 @@
-//! The pool: every node the search has materialised so far, indexed by
-//! NodeId, by program size (for split-by-size action enumeration), and by
-//! `(canonical_type, value_tuple_hash)` (for observational-equivalence
+//! The pool: every candidate node the search has materialised so far,
+//! indexed by NodeId, by program size (for split-by-size action
+//! enumeration), and by value-tuple-hash (for observational-equivalence
 //! dedup).
 //!
-//! Hash-cons in the arena guarantees structural duplicates collapse to
-//! the same NodeId; the pool keeps at most one entry per NodeId.
+//! Without a static type system, obs-eq is a pure function of the
+//! values: two candidates are equivalent if they produce the same
+//! tuple of values across every example. Closures don't compare
+//! structurally — `value_obs_key` returns `None` for any tuple
+//! containing a closure, and the caller decides whether to skip dedup
+//! or fall back to the probe-based key.
 
 use std::hash::Hasher;
 
-use rustc_hash::FxHashMap;
-use rustc_hash::FxHasher;
+use rustc_hash::{FxHashMap, FxHasher};
 
-use lang::arena::{Arena, NodeId};
+use lang::arena::NodeId;
 use lang::eval::{apply, Value};
 use lang::library::Library;
-use lang::ty::{unify, Subst, Ty, TyCon};
 
 use crate::value_hash::hash_values;
 
-/// One pool entry: a node, its evaluated values per task example, and the
-/// program size of its DAG (number of *unique* sub-nodes).
 #[derive(Clone, Debug)]
 pub(crate) struct Entry {
     pub node: NodeId,
@@ -30,14 +30,8 @@ pub(crate) struct Entry {
 #[derive(Default)]
 pub(crate) struct Pool {
     pub entries: Vec<Entry>,
-    /// node_id -> entry index. Lookup decides whether a freshly hash-consed
-    /// node is already present.
     pub by_node: FxHashMap<NodeId, usize>,
-    /// (canonical type, value-tuple-hash) collapsed into one u64. Maps to
-    /// entry index. Only used for entries whose type is non-functional.
     pub by_obs: FxHashMap<u64, usize>,
-    /// `by_size[k]` holds entry indices of all size-k entries. Index 0 is
-    /// always empty (no entries have size 0).
     pub by_size: Vec<Vec<usize>>,
 }
 
@@ -67,13 +61,6 @@ impl Pool {
         &self.entries[idx]
     }
 
-    /// Try to add a new entry. Callers pre-compute the obs-eq key:
-    /// `Some(key)` means "this entry is observationally equivalent to any
-    /// other entry with the same key — drop if one already exists";
-    /// `None` means "skip obs-eq dedup for this entry".
-    ///
-    /// `node`-level dedup is always applied (hash-cons collapses
-    /// structural duplicates).
     pub fn try_add(
         &mut self,
         node: NodeId,
@@ -85,8 +72,7 @@ impl Pool {
             return AddOutcome::DuplicateNode;
         }
         if let Some(key) = obs_key {
-            if let Some(&existing) = self.by_obs.get(&key) {
-                let _ = existing;
+            if self.by_obs.contains_key(&key) {
                 return AddOutcome::ObsEqPruned;
             }
             self.by_obs.insert(key, self.entries.len());
@@ -103,62 +89,6 @@ impl Pool {
     }
 }
 
-/// Compute an obs-eq key for a non-function-typed entry. Returns `None`
-/// if the type is functional (caller should consider the extended /
-/// probe-based key, or skip).
-pub(crate) fn value_obs_key(ty: &Ty, values: &[Value]) -> Option<u64> {
-    if !should_obs_eq(ty) {
-        return None;
-    }
-    let mut h = FxHasher::default();
-    hash_type(ty, &mut h);
-    hash_values(values, &mut h);
-    Some(h.finish())
-}
-
-/// Compute the *extended* obs-eq key for a function-typed entry whose
-/// type is `arg_ty -> R` with `R` concrete. The key hashes (R type,
-/// applied_values) — i.e. what the closure produces when applied to the
-/// task's example inputs.
-///
-/// Returns `None` if the entry's type isn't of the right shape, or if
-/// any apply failed.
-pub(crate) fn applied_obs_key(
-    arena: &Arena,
-    lib: &Library,
-    ty: &Ty,
-    values: &[Value],
-    inputs: &[Value],
-    arg_ty: &Ty,
-    fuel: u32,
-) -> Option<u64> {
-    let (a_ty, r_ty) = ty.as_func()?;
-    if !should_obs_eq(r_ty) {
-        return None;
-    }
-    // Require a_ty unifies with arg_ty (i.e., the closure's first arg is
-    // shaped like the task's input).
-    let mut s = Subst::default();
-    if unify(a_ty, arg_ty, &mut s).is_err() {
-        return None;
-    }
-    if values.len() != inputs.len() {
-        return None;
-    }
-    let mut applied = Vec::with_capacity(values.len());
-    for (closure, input) in values.iter().zip(inputs.iter()) {
-        let mut f = fuel;
-        match apply(arena, lib, closure.clone(), input.clone(), &mut f) {
-            Ok(v) => applied.push(v),
-            Err(_) => return None,
-        }
-    }
-    let mut h = FxHasher::default();
-    hash_type(r_ty, &mut h);
-    hash_values(&applied, &mut h);
-    Some(h.finish())
-}
-
 #[derive(Debug)]
 pub(crate) enum AddOutcome {
     Added,
@@ -166,18 +96,65 @@ pub(crate) enum AddOutcome {
     ObsEqPruned,
 }
 
-/// Whether obs-eq dedup applies to a value of this type. We dedup
-/// concrete data types (Int, Bool, List<concrete>, Pair<concrete>, ...) but
-/// skip function types — closures don't compare structurally.
-fn should_obs_eq(ty: &Ty) -> bool {
-    match ty {
-        Ty::Var(_) => true, // a polymorphic value is concrete enough at runtime
-        Ty::Con(TyCon::Fn, _) => false,
-        Ty::Con(_, args) => args.iter().all(should_obs_eq),
+/// Compute a value-tuple obs-eq key. Returns `None` if any of the
+/// values is a `Closure` — closure values aren't comparable, so
+/// callers must either fall back to the probe-based key or skip dedup.
+pub(crate) fn value_obs_key(values: &[Value]) -> Option<u64> {
+    if values.iter().any(|v| matches!(v, Value::Closure(_))) {
+        return None;
     }
+    let mut h = FxHasher::default();
+    hash_values(values, &mut h);
+    Some(h.finish())
 }
 
-fn hash_type<H: Hasher>(ty: &Ty, h: &mut H) {
-    use std::hash::Hash;
-    ty.hash(h);
+/// Probe-based obs-eq key for closure-valued candidates: apply each
+/// closure value to its corresponding example input and hash the
+/// resulting values.
+///
+/// Returns `None` (skip dedup) if:
+/// - any value isn't a closure;
+/// - any apply yields another closure (probe didn't reach a concrete
+///   value, the closure has more args to consume);
+/// - any apply yields `Bottom` (the closure can't be applied directly
+///   to the input, but it may still compose usefully in a higher-order
+///   context — e.g. `App(add, 1)` Bottom-probes against a `List` input
+///   but is essential as a fold callback);
+/// - any apply errors out.
+///
+/// Only deduping on **concrete non-Bottom probe values** keeps the
+/// soundness narrow: two closures that produce identical concrete
+/// values when applied directly to the example inputs are equivalent
+/// for the goal-level use `App(closure, Param(0))`. Whether they're
+/// equivalent in arbitrary higher-order contexts is not guaranteed,
+/// but for M2 trivial tasks the goal-level use is the only one.
+pub(crate) fn probe_obs_key(
+    arena: &lang::arena::Arena,
+    lib: &Library,
+    values: &[Value],
+    inputs: &[Value],
+    fuel: u32,
+) -> Option<u64> {
+    if values.len() != inputs.len() {
+        return None;
+    }
+    let mut applied = Vec::with_capacity(values.len());
+    for (closure, input) in values.iter().zip(inputs.iter()) {
+        if !matches!(closure, Value::Closure(_)) {
+            return None;
+        }
+        let mut f = fuel;
+        match apply(arena, lib, closure.clone(), input.clone(), &mut f) {
+            Ok(v) => {
+                if matches!(v, Value::Closure(_)) || v.is_bottom() {
+                    return None;
+                }
+                applied.push(v);
+            }
+            Err(_) => return None,
+        }
+    }
+    let mut h = FxHasher::default();
+    hash_values(&applied, &mut h);
+    Some(h.finish())
 }

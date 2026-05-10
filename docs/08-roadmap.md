@@ -37,29 +37,56 @@ Acceptance: `cargo test -p lang` passes the empty test.
 
 ## Milestone 1 — `lang` end-to-end (1 week)
 
-- IR, hash-cons arena, typed constructors, type inference (HM).
+- IR, hash-cons arena, constructors.
 - Strict evaluator with fuel and `Value` type.
-- Initial built-ins (numeric, list, conditional, higher-order list ops).
+- Initial built-ins (numeric, list, conditional, higher-order list ops,
+  `K` and `B` combinators).
 - Property tests at Layer 1.
 - Reference Python evaluator for differential tests.
 - A handwritten test suite of 10–20 small programs (sum, reverse, sort, …)
   that all evaluate correctly.
 
 Acceptance: any program in the test suite evaluates correctly; round-trip
-serialisation works; type errors are caught at construction.
+serialisation works.
+
+**Note on the type system.** The original M1 plan included Hindley-Milner
+type inference. We shipped that, then stripped it out at the start of M2
+when it became clear that the static-type machinery was both costly to
+maintain and *too restrictive* to support tasks that legitimately route
+through `Bool` or `Pair` intermediates. Runtime type errors now surface
+as `Value::Bottom`. See `docs/decisions/m2-strip-static-types.md`.
 
 ## Milestone 2 — `tasks` and a no-NN search (1 week)
 
 - `Task` trait + at least one generator (`ListExamplesTask`, programmatic).
-- Search.solve with `policy = uniform-typed-prior`. No neural guidance.
-- The full search loop: action enumeration, beam, evaluation against task.
+- BUSTLE-style bottom-up size-iterative enumeration. No static types,
+  no neural guidance, uniform priors.
+- Observational-equivalence dedup over runtime values, with a
+  probe-based extension for closure-typed entries.
 
-At this point we have a vanilla typed-enumeration program synthesizer. It
-should solve trivial list tasks (`identity`, `head`, `length`,
-`add-one-to-each`) within seconds. It will *not* solve `sum`, `sort` —
-that's fine, that's why we add neural guidance and library growth.
+At this point we have a vanilla untyped-enumeration program synthesiser.
+Empirically (release build, single-machine):
 
-Acceptance: 5 of 5 trivial list tasks solved within 10s each.
+| Task               | Size | Solve time         |
+|--------------------|------|--------------------|
+| `identity`         | 1    | < 0.1 ms           |
+| `sum`              | 7    | ~ 30 ms            |
+| `head`             | 7    | ~ 30 ms            |
+| `length`           | 11   | ~ 15 s             |
+| `add-one-to-each`  | 13   | does not solve in 60 s |
+
+Acceptance: 4 of the 5 list tasks solve under their budgets;
+`add-one-to-each` is run as a *characterisation* test only — its
+13-node program is past the boundary of un-guided enumeration on this
+primitive set, and it goes on the M5 evaluation suite as a target the
+wake/sleep loop should crack once neural guidance and library growth
+are in place.
+
+The roadmap originally promised "5 of 5 within 10 s" with type-driven
+pruning carrying the load. After stripping static types we honestly
+can't deliver size-13 inside 10s without a smarter prior, and trying
+to hard-wire one would re-introduce exactly the brittleness that
+motivated removing types. M5 is the right place for the speedup.
 
 ## Milestone 3 — `library` + abstraction sleep (1 week)
 
@@ -141,4 +168,4 @@ The areas most likely to surprise us, with mitigations:
 | `tch` ergonomic friction | Medium | Trait-bounded `Tensor` so we can swap to `burn` |
 | ARC turns out to need totally new abstractions | High | Plan ARC as v2; v1 success criterion is list/string |
 | Replay buffer not large enough to drive learning | Medium | Dreams compensate; tune ratio |
-| Type inference overhead during search | Low | Memoise type instantiations; this is small in practice |
+| Action space without static types is too large | High | M2 baseline already shows the cost; M4 neural prior is the planned mitigation |

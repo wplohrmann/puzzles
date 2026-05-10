@@ -42,16 +42,26 @@ levels, in case we need them.
 Confirm this is acceptable, or insist on first-class anonymous lambdas and
 I'll redesign.
 
-### 3. Types are mandatory
+### 3. ~~Types are mandatory~~ → no static types (revised at M2)
 
-Your description doesn't mention a type system; the existing
-`graph-seek/src/main.rs` hints at one, so I assumed yes. I built the
-architecture around Hindley-Milner polymorphism. Without types, search
-explores ~100× more dead programs and library extraction has nothing to
-constrain anti-unification — the system becomes much harder.
+**Original position**: I built the architecture around Hindley-Milner
+polymorphism, on the argument that without types the search would
+explore ~100× more dead programs and library extraction would have
+nothing to constrain anti-unification.
 
-If you want untyped: confirm it, and I'll redo the search and library
-designs accordingly.
+**Revised position (start of M2)**: stripped. Types were too restrictive
+to support tasks that route through `Bool`/`Pair` intermediates, and
+the auto-derived "goal-tycon filter" we'd need to make typed-search
+tractable was both ad hoc and unsound. The neural recogniser sees
+runtime values directly via node embeddings (`02-neural.md`); we let
+it learn type-equivalents implicitly. Library extraction uses
+runtime-value variants as a coarse type proxy (`04-library.md`).
+
+The cost is a slower un-guided search at deeper sizes — `add-one-to-each`
+(13 nodes) doesn't fit in 60 s without a prior. M4 (neural guidance)
+is where this gets paid back.
+
+See `docs/decisions/m2-strip-static-types.md` for the full discussion.
 
 ### 4. Two-component embeddings (revised after discussion)
 
@@ -132,12 +142,11 @@ These are the answers we've converged on.
    restructuring.
 10. **`graph-seek/` is throwaway.** New workspace; `crates/lang` from
     scratch.
-11. **Type system: HM-lite.** Every primitive carries a hand-written
-    polytype; `Apply` does unification at every call-site. No general
-    inference for unknown terms (there are none — search constructs
-    programs from typed components). ~100 lines of unification code.
-12. **Structured types in v0: `Int, Bool, Float, Char, Pair<A,B>, List<T>`
-    plus `Bottom` for failure.** Trees, dicts, sets are *encoded*
+11. **Type system: ~~HM-lite~~ → none (revised at M2)**. Nodes carry
+    no static type. Mismatches surface as `Value::Bottom` at runtime.
+    See item #3 above and `docs/decisions/m2-strip-static-types.md`.
+12. **Runtime value variants in v0: `Int, Bool, Float, Char, Pair<A,B>,
+    List<T>`, `Closure`, `Bottom`.** Trees, dicts, sets are *encoded*
     (`Tree<T> ≡ Pair<T, List<Tree<T>>>` etc.); sum types and ADTs
     deferred. Recursion is via `fold` and `unfold` primitives, not
     user-defined fixed points.
