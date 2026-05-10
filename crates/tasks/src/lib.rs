@@ -119,8 +119,8 @@ mod tests {
     /// `λxs. fold add 0 xs` (sum). Used as ground-truth.
     fn build_sum_ground_truth(arena: &mut Arena, lib: &Library) -> NodeId {
         let p = param(arena, 0);
-        let fold = prim_ref(arena, lib, lib.lookup("fold").unwrap());
-        let add = prim_ref(arena, lib, lib.lookup("add").unwrap());
+        let fold = prim_ref(arena, lib.lookup("fold").unwrap());
+        let add = prim_ref(arena, lib.lookup("add").unwrap());
         let zero = lit(arena, LitValue::Int(0));
         let f1 = app(arena, fold, add);
         let f2 = app(arena, f1, zero);

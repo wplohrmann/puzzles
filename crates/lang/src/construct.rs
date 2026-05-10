@@ -6,7 +6,7 @@
 
 use crate::arena::{Arena, NodeId};
 use crate::ir::{LitValue, NodeKind};
-use crate::library::{Library, PrimId};
+use crate::library::PrimId;
 
 pub fn lit(arena: &mut Arena, v: LitValue) -> NodeId {
     arena.intern(NodeKind::Literal(v))
@@ -20,7 +20,7 @@ pub fn lambda(arena: &mut Arena, body: NodeId) -> NodeId {
     arena.intern(NodeKind::Lambda { body })
 }
 
-pub fn prim_ref(arena: &mut Arena, _lib: &Library, p: PrimId) -> NodeId {
+pub fn prim_ref(arena: &mut Arena, p: PrimId) -> NodeId {
     arena.intern(NodeKind::PrimRef(p))
 }
 
@@ -32,10 +32,7 @@ pub fn app(arena: &mut Arena, func: NodeId, arg: NodeId) -> NodeId {
 mod tests {
     use super::*;
     use crate::builtin::{seed_builtin_library, BuiltinId};
-
-    fn lib() -> Library {
-        seed_builtin_library()
-    }
+    use crate::library::Library;
 
     fn lookup(lib: &Library, b: BuiltinId) -> PrimId {
         lib.lookup(b.name()).expect("builtin present")
@@ -43,9 +40,9 @@ mod tests {
 
     #[test]
     fn add_1_2_constructs() {
-        let lib = lib();
+        let lib = seed_builtin_library();
         let mut a = Arena::new();
-        let add_ref = prim_ref(&mut a, &lib, lookup(&lib, BuiltinId::Add));
+        let add_ref = prim_ref(&mut a, lookup(&lib, BuiltinId::Add));
         let one = lit(&mut a, LitValue::Int(1));
         let two = lit(&mut a, LitValue::Int(2));
         let app1 = app(&mut a, add_ref, one);
@@ -54,9 +51,9 @@ mod tests {
 
     #[test]
     fn dedup_via_hash_cons() {
-        let lib = lib();
+        let lib = seed_builtin_library();
         let mut a = Arena::new();
-        let cons = prim_ref(&mut a, &lib, lookup(&lib, BuiltinId::Cons));
+        let cons = prim_ref(&mut a, lookup(&lib, BuiltinId::Cons));
         let one_a = lit(&mut a, LitValue::Int(1));
         let one_b = lit(&mut a, LitValue::Int(1));
         assert_eq!(one_a, one_b, "literals dedup");

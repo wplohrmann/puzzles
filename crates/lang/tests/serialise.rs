@@ -12,10 +12,10 @@ const FUEL: u32 = 100_000;
 fn build_sum_1_2_3() -> (Arena, lang::arena::NodeId) {
     let lib = seed_builtin_library();
     let mut a = Arena::new();
-    let nil = prim_ref(&mut a, &lib, lib.lookup("nil").unwrap());
-    let cons = prim_ref(&mut a, &lib, lib.lookup("cons").unwrap());
-    let add = prim_ref(&mut a, &lib, lib.lookup("add").unwrap());
-    let fold = prim_ref(&mut a, &lib, lib.lookup("fold").unwrap());
+    let nil = prim_ref(&mut a, lib.lookup("nil").unwrap());
+    let cons = prim_ref(&mut a, lib.lookup("cons").unwrap());
+    let add = prim_ref(&mut a, lib.lookup("add").unwrap());
+    let fold = prim_ref(&mut a, lib.lookup("fold").unwrap());
 
     let mut list = nil;
     for i in (1..=3).rev() {
@@ -94,11 +94,11 @@ fn dropping_unused_nodes_round_trips_only_reachable() {
     let mut a = Arena::new();
     let _unused1 = lit(&mut a, LitValue::Int(999));
     let _unused2 = lit(&mut a, LitValue::Bool(true));
-    let _unused3 = prim_ref(&mut a, &lib, lib.lookup("snd").unwrap());
+    let _unused3 = prim_ref(&mut a, lib.lookup("snd").unwrap());
 
     let one = lit(&mut a, LitValue::Int(1));
     let two = lit(&mut a, LitValue::Int(2));
-    let add = prim_ref(&mut a, &lib, lib.lookup("add").unwrap());
+    let add = prim_ref(&mut a, lib.lookup("add").unwrap());
     let app1 = app(&mut a, add, one);
     let prog = app(&mut a, app1, two);
 

@@ -39,54 +39,27 @@ Acceptance: `cargo test -p lang` passes the empty test.
 
 - IR, hash-cons arena, constructors.
 - Strict evaluator with fuel and `Value` type.
-- Initial built-ins (numeric, list, conditional, higher-order list ops,
-  `K` and `B` combinators).
-- Property tests at Layer 1.
-- Reference Python evaluator for differential tests.
-- A handwritten test suite of 10–20 small programs (sum, reverse, sort, …)
-  that all evaluate correctly.
+- Initial built-ins (numeric, list, conditional, higher-order list
+  ops, `K` and `B` combinators).
+- Property tests + a handwritten suite of small programs.
 
-Acceptance: any program in the test suite evaluates correctly; round-trip
-serialisation works.
-
-**Note on the type system.** The original M1 plan included Hindley-Milner
-type inference. We shipped that, then stripped it out at the start of M2
-when it became clear that the static-type machinery was both costly to
-maintain and *too restrictive* to support tasks that legitimately route
-through `Bool` or `Pair` intermediates. Runtime type errors now surface
-as `Value::Bottom`. See `docs/decisions/m2-strip-static-types.md`.
+Acceptance: every program in the test suite evaluates correctly;
+round-trip serialisation works.
 
 ## Milestone 2 — `tasks` and a no-NN search (1 week)
 
-- `Task` trait + at least one generator (`ListExamplesTask`, programmatic).
-- BUSTLE-style bottom-up size-iterative enumeration. No static types,
-  no neural guidance, uniform priors.
-- Observational-equivalence dedup over runtime values, with a
-  probe-based extension for closure-typed entries.
+- `Task` trait + `ListExamplesTask` (programmatic generator).
+- Bottom-up size-iterative enumeration. No neural guidance, no
+  value-based pruning beyond hash-cons identity.
 
-At this point we have a vanilla untyped-enumeration program synthesiser.
-Empirically (release build, single-machine):
+At this point we have a vanilla un-guided program synthesiser. The
+trivial list bench (`cargo bench --bench trivial_list`) characterises
+its speed limits; size-7 programs land quickly, size-11 and beyond
+take orders of magnitude longer. Closing that gap is the M4 neural
+prior's job — search-time speed is not an M2 acceptance criterion.
 
-| Task               | Size | Solve time         |
-|--------------------|------|--------------------|
-| `identity`         | 1    | < 0.1 ms           |
-| `sum`              | 7    | ~ 30 ms            |
-| `head`             | 7    | ~ 30 ms            |
-| `length`           | 11   | ~ 15 s             |
-| `add-one-to-each`  | 13   | does not solve in 60 s |
-
-Acceptance: 4 of the 5 list tasks solve under their budgets;
-`add-one-to-each` is run as a *characterisation* test only — its
-13-node program is past the boundary of un-guided enumeration on this
-primitive set, and it goes on the M5 evaluation suite as a target the
-wake/sleep loop should crack once neural guidance and library growth
-are in place.
-
-The roadmap originally promised "5 of 5 within 10 s" with type-driven
-pruning carrying the load. After stripping static types we honestly
-can't deliver size-13 inside 10s without a smarter prior, and trying
-to hard-wire one would re-introduce exactly the brittleness that
-motivated removing types. M5 is the right place for the speedup.
+Acceptance: `cargo test` passes (the search pipeline runs end-to-end
+on identity); the bench produces useful numbers as a baseline.
 
 ## Milestone 3 — `library` + abstraction sleep (1 week)
 

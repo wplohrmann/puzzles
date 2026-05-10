@@ -17,37 +17,19 @@ pub struct SearchConfig {
     pub time_budget: Duration,
     /// Literal seeds added to the pool at size 1.
     pub literal_seeds: Vec<LitValue>,
-    /// If true (default), drop any candidate whose values on every
-    /// example are `Bottom`. Bottom-only candidates can't be solutions
-    /// and only propagate Bottom when used as App args.
-    pub drop_all_bottom: bool,
-    /// If true (default), apply BUSTLE-style probe-based obs-eq to
-    /// closure-valued candidates: apply the closure to each example
-    /// input and dedup on the resulting values. Skipped if the probe
-    /// itself yields another closure (we can't dedup a value tuple of
-    /// closures).
-    ///
-    /// Soundness caveat: prunes closures that behave identically when
-    /// applied directly to each example input but might differ when
-    /// applied to other inputs (e.g. inside `fold`). For M2 trivial
-    /// tasks every solution applies its outer closure directly to
-    /// `Param(0)`, so the prune is sound.
-    pub extended_obs_eq: bool,
 }
 
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
             max_program_size: 16,
-            max_pool_size: 20_000_000,
+            max_pool_size: 2_000_000,
             eval_fuel: 200_000,
             time_budget: Duration::from_secs(10),
             literal_seeds: vec![
                 LitValue::Int(0),
                 LitValue::Int(1),
             ],
-            drop_all_bottom: true,
-            extended_obs_eq: true,
         }
     }
 }
@@ -57,7 +39,10 @@ pub struct SearchStats {
     pub seeds: u64,
     pub apps_attempted: u64,
     pub apps_dup_node: u64,
-    pub apps_obs_eq_pruned: u64,
+    /// Candidates dropped because their values contain `Bottom` on at
+    /// least one example. `apply` propagates `Bottom` strictly and
+    /// `values_match` rejects any `Bottom`, so such candidates are
+    /// incapable of contributing to a solution.
     pub apps_bottom_pruned: u64,
     pub apps_added: u64,
     pub max_size_explored: u32,

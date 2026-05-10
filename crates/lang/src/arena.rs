@@ -7,12 +7,12 @@
 //! semantically-equal subterms share storage and equality is
 //! `NodeId == NodeId`.
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::hash::{Hash, Hasher};
 
 pub use crate::ir::{Node, NodeId, NodeKind};
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Arena {
     nodes: Vec<Node>,
     intern: FxHashMap<u64, Vec<NodeId>>,
@@ -59,22 +59,28 @@ impl Arena {
 
     /// Topologically-sorted set of all transitively-reachable nodes from
     /// `root`, in dependency order (children before parents). Useful for
-    /// serialisation and bottom-up traversal.
+    /// serialisation and bottom-up traversal. Iterative — safe for
+    /// arbitrarily deep DAGs.
     pub fn reachable_topo(&self, root: NodeId) -> Vec<NodeId> {
-        let mut seen = FxHashMap::<NodeId, bool>::default();
+        let mut seen = FxHashSet::<NodeId>::default();
         let mut order = Vec::new();
-        fn dfs(
-            arena: &Arena, id: NodeId,
-            seen: &mut FxHashMap<NodeId, bool>, out: &mut Vec<NodeId>,
-        ) {
-            if seen.contains_key(&id) { return; }
-            seen.insert(id, true);
-            for c in arena.children(id) {
-                dfs(arena, c, seen, out);
+        // Stack frame: (node, whether we've already pushed its children).
+        let mut stack: Vec<(NodeId, bool)> = vec![(root, false)];
+        while let Some((id, expanded)) = stack.pop() {
+            if expanded {
+                order.push(id);
+                continue;
             }
-            out.push(id);
+            if !seen.insert(id) {
+                continue;
+            }
+            stack.push((id, true));
+            for c in self.children(id) {
+                if !seen.contains(&c) {
+                    stack.push((c, false));
+                }
+            }
         }
-        dfs(self, root, &mut seen, &mut order);
         order
     }
 }

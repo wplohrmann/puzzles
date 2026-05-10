@@ -9,53 +9,27 @@
 
 ## No static type system
 
-The language has **no static type system**. Nodes carry only structural
-information (kind + children); there is no type field, no type schemes,
-no unification, no instantiation.
+Nodes carry only structural information (kind + children). There is no
+type field, no type scheme, no unification.
 
-This is a deliberate departure from the original architecture, taken
-during M2. The reasons:
-
-- **Hand-wired type rules don't scale to the eventual goal.** ARC-style
-  reasoning routinely uses `Pair` (coordinates), `Bool` (conditional
-  selection), and ad-hoc combinations that any "useful types only"
-  filter prunes. The instinct to constrain search via types collapses
-  exactly where it would matter most.
-- **The neural recogniser learns types implicitly.** Node embeddings
-  are computed from runtime values per example (`02-neural.md`), which
-  carry richer information than static types: actual data ranges,
-  shapes, distributions. The network learns "an `add`-like operation
-  expects numeric inputs" from observation, without us encoding it.
-- **Code shrinks substantially.** Removing types deleted ~600 lines
-  across the language and search — the unification engine, polytype
-  canonicalisation, fresh-variable threading, instantiation at every
-  `App` site. What remains is leaner and easier to evolve.
-
-What we still get without types:
+What this gets us:
 
 - **Runtime polymorphism falls out naturally.** `nil` is a single node
-  whose runtime value is `Value::List([])`; `cons 1 nil` and `cons true nil`
-  use the same `nil` and `cons` nodes structurally, with the `Value`
-  variant determined by the literal.
-- **Type errors become `Bottom`.** A primitive applied to runtime values
-  of the wrong shape (e.g. `add (Bool) (Int)`, `head []`, `div 1 0`)
-  returns `Value::Bottom(reason)`. Bottom propagates through evaluation
-  and is treated as not-a-solution by `Task::score`.
+  whose runtime value is `Value::List([])`; `cons 1 nil` and
+  `cons true nil` use the same `nil` and `cons` nodes structurally,
+  with the `Value` variant determined by the literal at evaluation
+  time.
+- **Type errors become `Bottom`.** A primitive applied to runtime
+  values of the wrong shape (e.g. `add Bool Int`, `head []`, `div 1 0`)
+  returns `Value::Bottom(reason)`. Bottom propagates through
+  evaluation and is treated as not-a-solution by `Task::score`.
+- **Construction is total.** Any `App(f, a)` is admissible at the IR
+  level; mismatches surface only at evaluation.
 
-What we lose:
-
-- **Construction-time type-checking.** Any `App(f, a)` is admissible at
-  the IR level. Mismatches surface only when the program is evaluated.
-- **Type-driven search pruning.** The search has to actually evaluate
-  candidates to discover which combinations Bottom-out. Aggressive
-  observational equivalence + `Bottom`-collapse mostly compensates,
-  but it shifts work from typecheck to runtime.
-- **Type-guided library extraction.** Anti-unification holes can no
-  longer be constrained by hole types. M3 will instead infer "hole
-  shapes" empirically from the runtime `Value` variants observed at
-  hole positions across training programs.
-
-See `docs/decisions/m2-strip-static-types.md` for the full discussion.
+The trade-off: search has to evaluate candidates to discover which
+combinations Bottom-out, and library extraction (M3) constrains
+anti-unification holes by the runtime `Value` variants observed at
+hole positions rather than by static type.
 
 ## Combinator calculus with optional explicit lambdas
 
@@ -134,13 +108,20 @@ pub enum PrimKind {
 
 pub struct Library {
     pub primitives: Vec<Primitive>,
-    pub arena:      Arena,            // shared arena for `Learned` bodies
+    /// Storage for `Learned` primitive bodies. The evaluator routes
+    /// `PrimKind::Learned { body }` through `&lib.arena`, not the
+    /// caller's program arena. Skipped on serde — M3 will need to
+    /// wire arena round-tripping at the same time as the first
+    /// Learned primitive is created.
+    pub arena: Arena,
 }
 ```
 
-The library is the only piece of state that grows with training. It is
-fully serialisable and versioned (every abstraction sleep emits a new
-`LibraryVersion`).
+The library is the only piece of state that grows with training. The
+`primitives` vector is serialisable and versioned (every abstraction
+sleep emits a new `LibraryVersion`); the embedded `arena` is currently
+`#[serde(skip)]` and will be wired into the wire format alongside the
+first Learned primitive.
 
 ### Initial built-ins (v0)
 
@@ -151,7 +132,11 @@ wake/sleep is working.
 
 - Numeric: `add, sub, mul, div : Int → Int → Int` (signatures shown for
   documentation; not enforced at construction).
-- Comparison: `lt, eq : Int → Int → Bool`.
+- Comparison: `eq` and `lt` are runtime-polymorphic. `eq` is deep
+  equality on every variant except `Closure`; mismatched variants
+  produce `Bottom` rather than `false`. `lt` is lex/strict ordering on
+  `Int | Float | Char | Bool | List | Pair`; mismatched variants and
+  closures produce `Bottom`.
 - Boolean: `if`, `not, and, or`.
 - Pair: `pair, fst, snd`.
 - List: `nil, cons`, `fold` (right-fold), `unfold`.
@@ -198,8 +183,9 @@ A simple recursive interpreter over the DAG, with three concerns:
    any `Param` is computed once per program. (M2's evaluator doesn't
    yet implement this memo; the search caches values at the pool level
    instead, which serves the same goal.)
-2. **Termination.** A fuel counter decremented on each evaluation step.
-   Exceeding fuel yields an `Err(OutOfFuel)`. Default fuel is
+2. **Termination.** A fuel counter decremented on each evaluation step
+   *and* on each iteration of the recursive primitives `fold` and
+   `unfold`. Exceeding fuel yields `Err(OutOfFuel)`. Default fuel is
    task-dependent (`tasks` provides it).
 3. **Higher-order primitives.** `fold`, etc. take a function value;
    we represent values as a tagged union with a `Closure` variant that
@@ -225,28 +211,23 @@ pub fn eval(arena: &Arena, lib: &Library, root: NodeId,
 
 `if cond then else` is detected syntactically at the apex of three
 chained `App` nodes and short-circuits: only the chosen branch is
-evaluated. This lets candidates have `Bottom`-producing dead branches
+evaluated. This lets candidates carry `Bottom`-producing dead branches
 without disqualifying themselves. The bottom-up search's `apply`-based
-incremental value computation does **not** preserve this laziness;
-documented as a known limitation in `docs/decisions/m2-search-tasks.md`.
+incremental value computation does **not** preserve this laziness; see
+[`03-search.md`](./03-search.md).
 
 ## Construction API
 
-The arena exposes a constructor API. Without static types there is no
-fallibility — any well-formed `App` succeeds.
+`crates/lang/src/construct.rs` exposes total constructors: any
+well-formed `App` succeeds.
 
 ```rust
-impl Arena {
-    pub fn lit(&mut self, v: LitValue) -> NodeId;
-    pub fn param(&mut self, index: u16) -> NodeId;
-    pub fn lambda(&mut self, body: NodeId) -> NodeId;
-    pub fn app(&mut self, func: NodeId, arg: NodeId) -> NodeId;
-    pub fn prim_ref(&mut self, lib: &Library, p: PrimId) -> NodeId;
-}
+pub fn lit(arena: &mut Arena, v: LitValue) -> NodeId;
+pub fn param(arena: &mut Arena, index: u16) -> NodeId;
+pub fn lambda(arena: &mut Arena, body: NodeId) -> NodeId;
+pub fn app(arena: &mut Arena, func: NodeId, arg: NodeId) -> NodeId;
+pub fn prim_ref(arena: &mut Arena, p: PrimId) -> NodeId;
 ```
-
-(In the codebase these live in `crates/lang/src/construct.rs`; the
-struct method form here is a documentation convenience.)
 
 ## Serialisation
 

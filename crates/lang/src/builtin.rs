@@ -14,7 +14,10 @@ use crate::library::{Library, PrimKind, Primitive};
 pub enum BuiltinId {
     // Numeric
     Add, Sub, Mul, Div,
-    Lt, Eq,
+    /// Polymorphic strict ordering on `Int | Float | Char | Bool | List | Pair`.
+    Lt,
+    /// Polymorphic deep equality on every variant except `Closure`.
+    Eq,
 
     // Boolean
     Not, And, Or,

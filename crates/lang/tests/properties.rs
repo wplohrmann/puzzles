@@ -36,7 +36,7 @@ proptest! {
         let mut arena = Arena::new();
         let na = lit(&mut arena, LitValue::Int(a));
         let nb = lit(&mut arena, LitValue::Int(b));
-        let add = prim_ref(&mut arena, &lib, lib.lookup("add").unwrap());
+        let add = prim_ref(&mut arena, lib.lookup("add").unwrap());
         let app1 = app(&mut arena, add, na);
         let prog = app(&mut arena, app1, nb);
         let v = eval_program(&arena, &lib, prog, vec![], 1_000).unwrap();
@@ -51,7 +51,7 @@ proptest! {
         let mut arena = Arena::new();
         let nb = lit(&mut arena, LitValue::Bool(b));
         let one = lit(&mut arena, LitValue::Int(1));
-        let add = prim_ref(&mut arena, &lib, lib.lookup("add").unwrap());
+        let add = prim_ref(&mut arena, lib.lookup("add").unwrap());
         let app1 = app(&mut arena, add, nb);
         let prog = app(&mut arena, app1, one);
         let v = eval_program(&arena, &lib, prog, vec![], 1_000).unwrap();
@@ -63,10 +63,10 @@ proptest! {
     fn fold_sum_intern_idempotent(xs in proptest::collection::vec(-100i64..=100, 0..=10)) {
         let lib = seed_builtin_library();
         let build = |arena: &mut Arena| {
-            let nil = prim_ref(arena, &lib, lib.lookup("nil").unwrap());
-            let cons = prim_ref(arena, &lib, lib.lookup("cons").unwrap());
-            let add = prim_ref(arena, &lib, lib.lookup("add").unwrap());
-            let fold = prim_ref(arena, &lib, lib.lookup("fold").unwrap());
+            let nil = prim_ref(arena, lib.lookup("nil").unwrap());
+            let cons = prim_ref(arena, lib.lookup("cons").unwrap());
+            let add = prim_ref(arena, lib.lookup("add").unwrap());
+            let fold = prim_ref(arena, lib.lookup("fold").unwrap());
             let mut list = nil;
             for &i in xs.iter().rev() {
                 let n = lit(arena, LitValue::Int(i));
@@ -89,10 +89,10 @@ proptest! {
     fn fold_sum_is_correct(xs in proptest::collection::vec(-100i64..=100, 0..=20)) {
         let lib = seed_builtin_library();
         let mut arena = Arena::new();
-        let nil = prim_ref(&mut arena, &lib, lib.lookup("nil").unwrap());
-        let cons = prim_ref(&mut arena, &lib, lib.lookup("cons").unwrap());
-        let add = prim_ref(&mut arena, &lib, lib.lookup("add").unwrap());
-        let fold = prim_ref(&mut arena, &lib, lib.lookup("fold").unwrap());
+        let nil = prim_ref(&mut arena, lib.lookup("nil").unwrap());
+        let cons = prim_ref(&mut arena, lib.lookup("cons").unwrap());
+        let add = prim_ref(&mut arena, lib.lookup("add").unwrap());
+        let fold = prim_ref(&mut arena, lib.lookup("fold").unwrap());
         let mut list = nil;
         for &i in xs.iter().rev() {
             let n = lit(&mut arena, LitValue::Int(i));
@@ -116,7 +116,7 @@ proptest! {
         let mut arena = Arena::new();
         let na = lit(&mut arena, LitValue::Int(a));
         let nb = lit(&mut arena, LitValue::Int(b));
-        let add = prim_ref(&mut arena, &lib, lib.lookup("add").unwrap());
+        let add = prim_ref(&mut arena, lib.lookup("add").unwrap());
         let app1 = app(&mut arena, add, na);
         let prog = app(&mut arena, app1, nb);
         let v1 = eval_program(&arena, &lib, prog, vec![], 1_000).unwrap();
@@ -136,8 +136,8 @@ proptest! {
         let na = lit(&mut arena, LitValue::Int(a));
         let nb = lit(&mut arena, LitValue::Int(b));
         let nc = lit(&mut arena, LitValue::Int(c));
-        let add = prim_ref(&mut arena, &lib, lib.lookup("add").unwrap());
-        let mul = prim_ref(&mut arena, &lib, lib.lookup("mul").unwrap());
+        let add = prim_ref(&mut arena, lib.lookup("add").unwrap());
+        let mul = prim_ref(&mut arena, lib.lookup("mul").unwrap());
         let app1 = app(&mut arena, add, na);
         let sum = app(&mut arena, app1, nb);
         let app2 = app(&mut arena, mul, sum);

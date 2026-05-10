@@ -1,8 +1,15 @@
 //! The library: a list of primitives (built-in or learned).
+//!
+//! Each `PrimKind::Learned` body is a `NodeId` into the library's own
+//! `arena` — *not* the caller's program arena. The evaluator routes
+//! Learned bodies through `&lib.arena`. The arena is deliberately not
+//! part of the serialized form yet (M2 has no Learned primitives); when
+//! abstraction sleep lands in M3 the Library serializer will need to
+//! emit the arena's reachable subgraph alongside `primitives`.
 
 use serde::{Deserialize, Serialize};
 
-use crate::arena::NodeId;
+use crate::arena::{Arena, NodeId};
 use crate::builtin::BuiltinId;
 
 pub type PrimId = u32;
@@ -19,13 +26,19 @@ pub struct Primitive {
 pub enum PrimKind {
     /// Implemented in the interpreter directly.
     Builtin(BuiltinId),
-    /// A closed program in the library's own arena.
+    /// A closed program living in the enclosing `Library::arena`.
     Learned { body: NodeId, body_size: u32 },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Library {
     pub primitives: Vec<Primitive>,
+    /// Storage for `Learned` primitive bodies. Empty in M2 (no
+    /// abstraction sleep yet). Skipped on serde — M3 will need to wire
+    /// arena round-tripping at the same time as the first Learned
+    /// primitive is created.
+    #[serde(skip, default)]
+    pub arena: Arena,
 }
 
 impl Library {

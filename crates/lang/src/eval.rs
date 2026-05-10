@@ -190,7 +190,8 @@ fn exec_prim(
     match &prim.kind {
         PrimKind::Builtin(b) => exec_builtin(*b, args, arena, lib, fuel),
         PrimKind::Learned { body, .. } => {
-            let mut v = eval(arena, lib, *body, &[], fuel)?;
+            // The body lives in the library's own arena, not the caller's.
+            let mut v = eval(&lib.arena, lib, *body, &[], fuel)?;
             for a in args {
                 v = apply(arena, lib, v, a, fuel)?;
             }
@@ -236,16 +237,8 @@ fn exec_builtin(
             if c == 0 { return Ok(Value::bottom("div by zero")); }
             Ok(Value::Int(a / c))
         }
-        Lt => {
-            let a = match args[0].as_int() { Some(v) => v, None => return Ok(Value::bottom("lt: non-Int")) };
-            let c = match args[1].as_int() { Some(v) => v, None => return Ok(Value::bottom("lt: non-Int")) };
-            Ok(Value::Bool(a < c))
-        }
-        Eq => {
-            let a = match args[0].as_int() { Some(v) => v, None => return Ok(Value::bottom("eq: non-Int")) };
-            let c = match args[1].as_int() { Some(v) => v, None => return Ok(Value::bottom("eq: non-Int")) };
-            Ok(Value::Bool(a == c))
-        }
+        Lt => poly_lt(&args[0], &args[1]),
+        Eq => poly_eq(&args[0], &args[1]),
         Not => match args[0].as_bool() {
             Some(b) => Ok(Value::Bool(!b)),
             None => Ok(Value::bottom("not: non-Bool")),
@@ -303,6 +296,7 @@ fn exec_builtin(
             let mut acc = z;
             for x in xs.iter().rev() {
                 if *fuel == 0 { return Err(Error::OutOfFuel); }
+                *fuel -= 1;
                 let f1 = apply(arena, lib, f.clone(), x.clone(), fuel)?;
                 acc = apply(arena, lib, f1, acc, fuel)?;
                 if acc.is_bottom() { return Ok(acc); }
@@ -350,6 +344,101 @@ fn exec_builtin(
             apply(arena, lib, f, gx, fuel)
         }
     }
+}
+
+// -- Polymorphic comparisons ---------------------------------------------
+
+/// `eq`: deep value equality. Closures and `Bottom` produce `Bottom` —
+/// closures because the language has no decidable function equality;
+/// `Bottom` because failed evaluations don't carry a defined value to
+/// compare against. Mismatched variants produce `Bottom` rather than
+/// `false` so that wrong-typed candidates can't sneak through a search
+/// by accident.
+fn poly_eq(a: &Value, b: &Value) -> Result<Value> {
+    if matches!(a, Value::Closure(_)) || matches!(b, Value::Closure(_)) {
+        return Ok(Value::bottom("eq: closure"));
+    }
+    if !same_variant(a, b) {
+        return Ok(Value::bottom("eq: variant mismatch"));
+    }
+    Ok(Value::Bool(a == b))
+}
+
+/// `lt`: lexicographic ordering on the structurally-comparable variants
+/// (`Int`, `Float`, `Char`, `Bool`, `List`, `Pair`). NaN-safe via
+/// `to_bits` for Floats. Closures, `Bottom`, and mismatched variants
+/// produce `Bottom`.
+fn poly_lt(a: &Value, b: &Value) -> Result<Value> {
+    use Value::*;
+    if matches!(a, Closure(_)) || matches!(b, Closure(_)) {
+        return Ok(Value::bottom("lt: closure"));
+    }
+    if matches!(a, Bottom(_)) || matches!(b, Bottom(_)) {
+        // `check_bottom` upstream already handles this for the common
+        // path, but `poly_lt` is also called recursively for List/Pair.
+        return Ok(Value::bottom("lt: bottom"));
+    }
+    if !same_variant(a, b) {
+        return Ok(Value::bottom("lt: variant mismatch"));
+    }
+    match (a, b) {
+        (Int(x), Int(y)) => Ok(Bool(x < y)),
+        (Float(x), Float(y)) => Ok(Bool(x.to_bits() < y.to_bits())),
+        (Char(x), Char(y)) => Ok(Bool(x < y)),
+        (Bool(x), Bool(y)) => Ok(Bool(!x & y)),
+        (List(xs), List(ys)) => list_lt(xs, ys),
+        (Pair(p), Pair(q)) => {
+            let first = poly_lt(&p.0, &q.0)?;
+            match first {
+                Bool(true) => Ok(Bool(true)),
+                Bool(false) => {
+                    let first_eq = poly_eq(&p.0, &q.0)?;
+                    match first_eq {
+                        Bool(true) => poly_lt(&p.1, &q.1),
+                        Bool(false) => Ok(Bool(false)),
+                        bot => Ok(bot),
+                    }
+                }
+                bot => Ok(bot),
+            }
+        }
+        _ => unreachable!("same_variant guarded above"),
+    }
+}
+
+fn list_lt(xs: &[Value], ys: &[Value]) -> Result<Value> {
+    let n = xs.len().min(ys.len());
+    for i in 0..n {
+        let lt = poly_lt(&xs[i], &ys[i])?;
+        match lt {
+            Value::Bool(true) => return Ok(Value::Bool(true)),
+            Value::Bool(false) => {
+                let eq = poly_eq(&xs[i], &ys[i])?;
+                match eq {
+                    Value::Bool(true) => continue,
+                    Value::Bool(false) => return Ok(Value::Bool(false)),
+                    bot => return Ok(bot),
+                }
+            }
+            bot => return Ok(bot),
+        }
+    }
+    Ok(Value::Bool(xs.len() < ys.len()))
+}
+
+fn same_variant(a: &Value, b: &Value) -> bool {
+    use Value::*;
+    matches!(
+        (a, b),
+        (Int(_), Int(_))
+            | (Bool(_), Bool(_))
+            | (Float(_), Float(_))
+            | (Char(_), Char(_))
+            | (List(_), List(_))
+            | (Pair(_), Pair(_))
+            | (Closure(_), Closure(_))
+            | (Bottom(_), Bottom(_))
+    )
 }
 
 // -- Lazy if helper -------------------------------------------------------

@@ -1,163 +1,118 @@
-# Critical review and resolved decisions
+# Design choices
 
-This document records the points where I made design decisions you may want
-to revisit, the places your original proposal had latent ambiguities, and
-the answers we converged on through discussion.
+The non-default calls underpinning the rest of the architecture, and
+the things deliberately left out of v0.
 
-After this document you should be able to start on `08-roadmap.md` Milestone 0
-without further blocking decisions.
+## Core choices
 
-## Things I changed in your proposal (and why)
+### Bottom-up construction with value-aware embeddings
 
-These are the spots I deviated most consciously. If any of them are wrong,
-the architecture will need rework, so flagging them deliberately.
+The search builds a pool of fully-formed evaluable nodes from the
+leaves up — one node per step (literal, primitive ref, or `App` of two
+pool nodes), with the network (M4 onwards) seeing each node's actual
+values on the task's examples. This is the BUSTLE / DeepCoder framing.
 
-### 1. Bottom-up construction with value-aware embeddings (resolved)
+Trade-offs:
+- Larger per-step action space than top-down. Hash-cons identity is
+  the only structural prune; value-based pruning is the M4 prior's
+  job.
+- Embedding caches split: a structural part is cacheable across
+  tasks, a value part is cacheable only within a task. Per-edit cost
+  is O(1) in graph size, O(n) in example count.
 
-Initial proposal: top-down expansion of typed holes. After discussion: the
-search builds a *pool* of fully-formed, evaluable nodes from the leaves up,
-adding one node per step (literal, primitive ref, or `Apply` of two pool
-nodes), with the network seeing each node's actual values on the task's
-examples. This is the BUSTLE / DeepCoder framing in modern PBE.
+### Combinator-style by default; lambdas optional in the IR
 
-Trade-offs we accept:
-- Larger per-step action space than top-down (any pair of pool nodes can
-  be applied, modulo typing). Mitigated by aggressive type pruning and
-  *observational equivalence* dedup (drop new nodes whose values match an
-  existing pool node of the same type).
-- Embedding caches split: structural part is cacheable across tasks, value
-  part is cacheable only within a task. Per-edit cost is still O(1) in
-  graph size, O(n) in example count.
+DAG sharing of arbitrary lambda terms is subtle (free variables move
+scope when shared). The default is combinator style: no free
+variables in the top-level program, higher-order arguments are passed
+by reference (`PrimRef` or library entry). Explicit `Lambda` nodes
+exist in the IR with de Bruijn indices and the evaluator handles
+them, but the search doesn't propose bare lambdas as actions.
 
-### 2. Combinator-style first, lambdas optional
+### No static type system
 
-You described the language as "lambda calculus in a DAG." DAG sharing of
-arbitrary lambda terms is subtle (free variables move scope when shared).
-The pragmatic fix is to default to **combinator style**: no free variables,
-higher-order arguments are passed by reference to primitives or library
-entries. This is what DreamCoder does and what the IR I designed
-prefers — but explicit `Lambda` nodes are still in the IR, with de Bruijn
-levels, in case we need them.
+Nodes carry only structural information. Type errors surface as
+`Value::Bottom` at evaluation. Library extraction (M3) constrains
+anti-unification holes by runtime `Value` variants observed at hole
+positions. See [`01-language.md`](./01-language.md).
 
-Confirm this is acceptable, or insist on first-class anonymous lambdas and
-I'll redesign.
+### Two-component embeddings
 
-### 3. ~~Types are mandatory~~ → no static types (revised at M2)
+Each node has a structural embedding (kind + child embeddings, plus
+PrimId for primitives) and a value embedding (the node's runtime
+values on the task's examples). They combine into the final node
+embedding; policy and value heads see both. See
+[`02-neural.md`](./02-neural.md).
 
-**Original position**: I built the architecture around Hindley-Milner
-polymorphism, on the argument that without types the search would
-explore ~100× more dead programs and library extraction would have
-nothing to constrain anti-unification.
+### Best-first beam, MCTS later
 
-**Revised position (start of M2)**: stripped. Types were too restrictive
-to support tasks that route through `Bool`/`Pair` intermediates, and
-the auto-derived "goal-tycon filter" we'd need to make typed-search
-tractable was both ad hoc and unsound. The neural recogniser sees
-runtime values directly via node embeddings (`02-neural.md`); we let
-it learn type-equivalents implicitly. Library extraction uses
-runtime-value variants as a coarse type proxy (`04-library.md`).
+Best-first beam guided by the policy prior is the default search.
+MCTS is the planned alternative for harder tasks where the value head
+can prune large branches; it's a benchmark comparison, not the
+default.
 
-The cost is a slower un-guided search at deeper sizes — `add-one-to-each`
-(13 nodes) doesn't fit in 60 s without a prior. M4 (neural guidance)
-is where this gets paid back.
+### Total/strict semantics; no IO; finite fuel
 
-See `docs/decisions/m2-strip-static-types.md` for the full discussion.
+Strict evaluation with a fuel counter and total primitives (`fold`,
+`unfold` for recursion). General recursion via Y is foreclosed; in
+return the search is well-behaved.
 
-### 4. Two-component embeddings (revised after discussion)
+### `Bottom` instead of `Maybe` everywhere
 
-Each node has a *structural* embedding (depends on kind, type, children's
-structural embeddings — task-independent, cached across tasks) plus a
-*value* embedding (depends on the node's concrete outputs on the task's
-examples — task-specific, cached within a task). They're combined into the
-final node embedding. The policy and value heads see both.
+When primitives fail (`head []`, `div 1 0`, `add Bool Int`), the
+program returns `Bottom` and the task scores it as not-solved. This
+avoids forcing every list-touching program to thread `Maybe` types,
+which would balloon node counts at the cost of a tiny amount of
+expressiveness.
 
-This preserves the cache benefit (per-edit cost stays O(1) in graph size)
-while giving the network the "are we close to the target?" signal it
-needs. See [02-neural.md](./02-neural.md).
-
-### 5. AlphaZero-style MCTS as a *secondary* option
-
-You raised AlphaZero. I think best-first beam search guided by the policy
-prior is a better default for program synthesis (smaller per-step
-expense, no rollouts, simpler). MCTS is implemented but not default.
-Happy to flip the default if you'd rather lean into MCTS.
-
-### 6. Total/strict semantics; no IO; finite fuel
-
-I closed off non-termination by mandating strict evaluation with a fuel
-counter and total primitives (`fold` etc. for recursion). This forecloses
-on some classical functional programs (general recursion via Y) but makes
-the search well-behaved.
-
-### 7. `Bottom` instead of `Maybe` everywhere
-
-When primitives fail (`head []`), the program returns `bottom` and the
-task scores it as not-solved. This avoids forcing every list-touching
-program to thread `Maybe` types around, which would balloon node counts.
-Costs us a tiny bit of expressiveness. Confirm.
-
-## Risks I think you should know about
+## Risks to know about
 
 - **Cache invalidation across library updates.** Every `LibraryRef`
   embedding becomes stale when a primitive's body changes. We track
-  dependencies, but get this wrong and training silently degrades.
-- **MDL counting subtlety.** Counting library bodies into the score lets
-  the system trade program-savings against library-cost — but only if
-  *novel* primitives count once globally, not once per use. We compute
-  total-corpus size including library, not per-program.
-- **Dreams over a young library.** Sampled programs are biased by the
-  current library, which biases the network, which biases the next wake's
-  search, which biases the next replay buffer. There's a feedback loop
-  here that DreamCoder also has — it sometimes makes the library go down
-  uninteresting paths. Audit-logging and library-GC are the levers.
-- **ARC-AGI ambition vs. v0 reality.** ARC tasks are unusually hard for
-  this approach. Expecting any meaningful pass rate in v0 will burn
-  motivation. Treating it as the v1 stretch goal — with list/string as
-  the v0 success criterion — is the right framing.
+  dependencies; getting it wrong silently degrades training.
+- **MDL counting subtlety.** Counting library bodies into the score
+  lets the system trade program-savings against library-cost — but
+  only if novel primitives count once globally, not once per use. We
+  compute total-corpus size including library, not per-program.
+- **Dreams over a young library** bias the network, which biases the
+  next wake's search, which biases the next replay buffer. Audit
+  logging and library GC are the levers.
+- **ARC-AGI ambition vs. v0 reality.** ARC is unusually hard for this
+  approach. List/string is the v0 success criterion; ARC is v1.
 
-## Resolved decisions
-
-These are the answers we've converged on.
+## Standing decisions
 
 1. **Neural framework: `tch` on Apple Silicon (MPS).** Trait-bounded
    `Tensor` so we can swap to `burn`/`candle` later without churn.
 2. **Search: best-first beam first; MCTS later** as a benchmark
    comparison. Both share the same bottom-up state and action space.
-3. **Lambdas: combinator-style by default; explicit `Lambda` nodes
-   available in the IR** for cases (e.g. anonymous grid mappers in ARC)
-   where they're cleaner. Search doesn't propose bare lambdas in v0.
-4. **Floats and gradient-based literal optim: deferred** until after the
-   list/string milestones.
-5. **ARC is the real goal.** List/string are the warm-up that lets us
-   prove the wake/sleep machinery is working before tackling ARC.
-6. **Hardware: M5 Pro, 48 GB, single-machine.** No distributed training
-   in v0; design throughput around this envelope.
+3. **Lambdas: combinator-style by default; explicit `Lambda` nodes in
+   the IR.** Search doesn't propose bare lambdas in v0.
+4. **Floats and gradient-based literal optimisation: deferred** until
+   after the list/string milestones.
+5. **ARC is the real goal.** List/string is the warm-up.
+6. **Hardware: M5 Pro, 48 GB, single-machine.** No distributed
+   training in v0.
 7. **Online vs offline: tunable.** The training loop runs as long as
-   you tell it to; checkpoints + a "freeze-and-export" path mean either
-   mode is supported by a flag, not a redesign.
+   you tell it to; checkpoints + a "freeze-and-export" path support
+   either mode behind a flag.
 8. **Determinism: nondeterministic if it's significantly faster.**
-   Keep a `--strict-determinism` flag for tests; not the default.
-9. **Replay buffer: unbounded for now**, with a `Filter` hook so we
-   can drop tasks (by age, family, program-size, etc.) later without
-   restructuring.
-10. **`graph-seek/` is throwaway.** New workspace; `crates/lang` from
-    scratch.
-11. **Type system: ~~HM-lite~~ → none (revised at M2)**. Nodes carry
-    no static type. Mismatches surface as `Value::Bottom` at runtime.
-    See item #3 above and `docs/decisions/m2-strip-static-types.md`.
-12. **Runtime value variants in v0: `Int, Bool, Float, Char, Pair<A,B>,
-    List<T>`, `Closure`, `Bottom`.** Trees, dicts, sets are *encoded*
-    (`Tree<T> ≡ Pair<T, List<Tree<T>>>` etc.); sum types and ADTs
-    deferred. Recursion is via `fold` and `unfold` primitives, not
-    user-defined fixed points.
+   `--strict-determinism` flag for tests; not the default.
+9. **Replay buffer: unbounded for now**, with a `Filter` hook to drop
+   tasks (by age, family, size) later without restructuring.
+10. **No static type system.** Nodes carry no type field; mismatches
+    surface as `Value::Bottom`.
+11. **Runtime value variants in v0: `Int, Bool, Float, Char, Pair,
+    List, Closure, Bottom`.** Trees, dicts, sets are encoded
+    (`Tree<T> ≡ Pair<T, List<Tree<T>>>`); sum types and ADTs
+    deferred. Recursion is via `fold`/`unfold`, not user-defined
+    fixed points.
 
-## Things explicitly out of scope for v0
-
-So we're aligned on what we're *not* building first:
+## Out of scope for v0
 
 - Distributed/multi-machine training.
 - Theorem proving / dependent types.
 - An interactive UI.
 - Probabilistic programs / stochastic primitives.
-- Tasks that involve interacting with an environment.
-- Multi-language program output (we generate one IR, period).
+- Tasks that interact with an environment.
+- Multi-language program output.

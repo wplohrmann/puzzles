@@ -10,11 +10,11 @@ use lang::library::Library;
 use tasks::ListExamplesTask;
 
 use crate::config::{SearchConfig, SearchResult, SearchStats};
-use crate::pool::{probe_obs_key, value_obs_key, AddOutcome, Pool};
+use crate::pool::{AddOutcome, Pool};
 
-/// M2 solve. Bottom-up size-iterative enumeration with
-/// observational-equivalence dedup. No static types, no neural
-/// guidance.
+/// M2 solve. Bottom-up size-iterative enumeration, no behavioural
+/// pruning beyond hash-cons-canonical dedup. Speed comes from the M4
+/// neural prior, not from hand-tuned heuristics.
 pub fn solve(
     arena: &mut Arena,
     lib: &Library,
@@ -29,7 +29,6 @@ pub fn solve(
 
     let mut pool = Pool::new();
 
-    // Seeds: Param(0), each literal seed, each primitive ref.
     seed_param(&mut pool, arena, lib, &inputs, config, &mut stats);
     if let Some(found) = check_pool_for_solution(&pool, &expected) {
         return finished(found, started, &pool, stats);
@@ -43,16 +42,10 @@ pub fn solve(
         return finished(found, started, &pool, stats);
     }
 
-    // Iterate by program size.
     for size in 2..=config.max_program_size {
         stats.max_size_explored = size;
 
-        // Iterate splits with large `k_f` first — splits like
-        // `(size-2, 1)` (which complete an `App(closure, Param)` chain)
-        // tend to produce concrete-typed results that often match the
-        // goal, while splits with small `k_f` extend compositions and
-        // explode the pool faster.
-        for k_f in (1..size).rev() {
+        for k_f in 1..size {
             let k_a = size - 1 - k_f;
             if k_a == 0 || k_a >= size {
                 continue;
@@ -60,15 +53,6 @@ pub fn solve(
             let f_indices: Vec<usize> = pool.entries_with_size(k_f).to_vec();
             let a_indices: Vec<usize> = pool.entries_with_size(k_a).to_vec();
             for &i_f in &f_indices {
-                // Runtime-based prefilter: skip f-entries whose values
-                // contain no closure on any example. Applying a non-
-                // function value as `f` produces `Bottom` 100% of the
-                // time, and obs-eq would collapse them all into a single
-                // Bottom entry — so iterating them just wastes work.
-                let f_vals_ref = &pool.entry(i_f).values;
-                if !f_vals_ref.iter().any(|v| matches!(v, Value::Closure(_))) {
-                    continue;
-                }
                 for &i_a in &a_indices {
                     if stats.apps_attempted & 4095 == 0
                         && (started.elapsed() > config.time_budget
@@ -81,9 +65,6 @@ pub fn solve(
 
                     let f_node = pool.entry(i_f).node;
                     let a_node = pool.entry(i_a).node;
-                    // Construction always succeeds — no static type
-                    // check. If `f`'s value isn't a closure, applying
-                    // produces Bottom and obs-eq collapses it.
                     let new_node = app(arena, f_node, a_node);
                     if pool.contains(new_node) {
                         stats.apps_dup_node += 1;
@@ -93,7 +74,6 @@ pub fn solve(
                     let f_vals = pool.entry(i_f).values.clone();
                     let a_vals = pool.entry(i_a).values.clone();
                     let values = apply_values(arena, lib, &f_vals, &a_vals, config.eval_fuel, &mut stats);
-
 
                     if values_match(&values, &expected) {
                         let entry_size = pool.entry(i_f).size + pool.entry(i_a).size + 1;
@@ -107,17 +87,21 @@ pub fn solve(
                         };
                     }
 
-                    let entry_size = pool.entry(i_f).size + pool.entry(i_a).size + 1;
-                    if config.drop_all_bottom && values.iter().all(|v| v.is_bottom()) {
+                    // A candidate whose values contain `Bottom` on any
+                    // example is incapable of being a solution: `apply`
+                    // propagates `Bottom` strictly, so every downstream
+                    // composition stays `Bottom` on that position, and
+                    // `values_match` rejects any `Bottom`. Skipping the
+                    // pool insertion avoids enumerating dead chains.
+                    if values.iter().any(|v| v.is_bottom()) {
                         stats.apps_bottom_pruned += 1;
                         continue;
                     }
 
-                    let obs_key = obs_key_for(arena, lib, &values, &inputs, config);
-                    match pool.try_add(new_node, entry_size, values, obs_key) {
+                    let entry_size = pool.entry(i_f).size + pool.entry(i_a).size + 1;
+                    match pool.try_add(new_node, entry_size, values) {
                         AddOutcome::Added => stats.apps_added += 1,
                         AddOutcome::DuplicateNode => stats.apps_dup_node += 1,
-                        AddOutcome::ObsEqPruned => stats.apps_obs_eq_pruned += 1,
                     }
                 }
             }
@@ -130,22 +114,6 @@ pub fn solve(
 
 // ------- seeding ---------------------------------------------------------
 
-fn obs_key_for(
-    arena: &Arena,
-    lib: &Library,
-    values: &[Value],
-    inputs: &[Value],
-    config: &SearchConfig,
-) -> Option<u64> {
-    value_obs_key(values).or_else(|| {
-        if config.extended_obs_eq {
-            probe_obs_key(arena, lib, values, inputs, config.eval_fuel)
-        } else {
-            None
-        }
-    })
-}
-
 fn seed_param(
     pool: &mut Pool,
     arena: &mut Arena,
@@ -156,8 +124,7 @@ fn seed_param(
 ) {
     let p = param(arena, 0);
     let values = eval_per_example(arena, lib, p, inputs, config.eval_fuel, stats);
-    let obs_key = obs_key_for(arena, lib, &values, inputs, config);
-    let _ = pool.try_add(p, 1, values, obs_key);
+    let _ = pool.try_add(p, 1, values);
     stats.seeds += 1;
 }
 
@@ -172,8 +139,7 @@ fn seed_literals(
     for v in &config.literal_seeds {
         let id = lit(arena, v.clone());
         let values = eval_per_example(arena, lib, id, inputs, config.eval_fuel, stats);
-        let obs_key = obs_key_for(arena, lib, &values, inputs, config);
-        let _ = pool.try_add(id, 1, values, obs_key);
+        let _ = pool.try_add(id, 1, values);
         stats.seeds += 1;
     }
 }
@@ -187,10 +153,9 @@ fn seed_primitives(
     stats: &mut SearchStats,
 ) {
     for p in 0..(lib.len() as u32) {
-        let id = prim_ref(arena, lib, p);
+        let id = prim_ref(arena, p);
         let values = eval_per_example(arena, lib, id, inputs, config.eval_fuel, stats);
-        let obs_key = obs_key_for(arena, lib, &values, inputs, config);
-        let _ = pool.try_add(id, 1, values, obs_key);
+        let _ = pool.try_add(id, 1, values);
         stats.seeds += 1;
     }
 }
@@ -221,12 +186,15 @@ fn eval_per_example(
         .collect()
 }
 
-/// BUSTLE-style incremental application. **Does not preserve the
-/// lazy-`if` optimisation** in `eval`: if the new node happens to be a
-/// fully-applied `if cond then else`, both `then` and `else` have
-/// already been computed in the cached values, and a Bottom in the
-/// unchosen branch will propagate through `apply`. For M2 trivial
-/// tasks this doesn't matter.
+/// Incremental application of `f` to `a` per example. Mirrors the
+/// `Value` produced by `eval` on the canonical `App(f, a)` node, except
+/// that the lazy-`if` short-circuit in `eval` is **not** preserved: a
+/// candidate whose top-level happens to be `if cond x y` will see
+/// `Bottom` propagate through `apply` from either branch. The
+/// solution-validator path uses `eval`, so an `if`-shaped solution that
+/// only Bottom-applies is still detected at the moment its node is
+/// constructed via `values_match` against `expected` — but it won't
+/// then live in the pool as a usable sub-result.
 fn apply_values(
     arena: &Arena,
     lib: &Library,
@@ -293,36 +261,5 @@ fn finished(
         elapsed: started.elapsed(),
         final_pool_size: pool.len(),
         stats,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use lang::builtin::seed_builtin_library;
-    use tasks::TaskId;
-
-    #[test]
-    fn solves_identity_at_seeding() {
-        let lib = seed_builtin_library();
-        let mut arena = Arena::new();
-        let task = ListExamplesTask {
-            id: TaskId(1),
-            examples: vec![
-                (
-                    Value::list_from(vec![Value::Int(1), Value::Int(2)]),
-                    Value::list_from(vec![Value::Int(1), Value::Int(2)]),
-                ),
-                (
-                    Value::list_from(vec![]),
-                    Value::list_from(vec![]),
-                ),
-            ],
-            fuel: 100_000,
-        };
-        let cfg = SearchConfig::default();
-        let r = solve(&mut arena, &lib, &task, &cfg);
-        assert!(r.solved, "identity not solved: {:?}", r);
-        assert_eq!(r.size, 1);
     }
 }

@@ -34,7 +34,7 @@ impl Builder {
 
     fn pref(&mut self, b: BuiltinId) -> lang::arena::NodeId {
         let p = self.p(b);
-        prim_ref(&mut self.arena, &self.lib, p)
+        prim_ref(&mut self.arena, p)
     }
 
     fn int(&mut self, n: i64) -> lang::arena::NodeId {
@@ -391,6 +391,108 @@ fn user_function_add_one_program() {
     let body = b.ap2(add, x, one);
     let f = lambda(&mut b.arena, body);
     assert_eq!(b.run_with(f, vec![Value::Int(41)]), Value::Int(42));
+}
+
+// --- polymorphic eq / lt ------------------------------------------------
+
+#[test]
+fn eq_int_int() {
+    let mut b = Builder::new();
+    let eq = b.pref(BuiltinId::Eq);
+    let one = b.int(1);
+    let one_again = b.int(1);
+    let prog = b.ap2(eq, one, one_again);
+    assert_eq!(b.run(prog), Value::Bool(true));
+}
+
+#[test]
+fn eq_bool_bool() {
+    let mut b = Builder::new();
+    let eq = b.pref(BuiltinId::Eq);
+    let t = b.boolean(true);
+    let f = b.boolean(false);
+    let prog = b.ap2(eq, t, f);
+    assert_eq!(b.run(prog), Value::Bool(false));
+}
+
+#[test]
+fn eq_list_int_list_int() {
+    let mut b = Builder::new();
+    let eq = b.pref(BuiltinId::Eq);
+    let xs_n: Vec<_> = (1..=3).map(|i| b.int(i)).collect();
+    let ys_n: Vec<_> = (1..=3).map(|i| b.int(i)).collect();
+    let xs = b.list(xs_n);
+    let ys = b.list(ys_n);
+    let prog = b.ap2(eq, xs, ys);
+    assert_eq!(b.run(prog), Value::Bool(true));
+}
+
+#[test]
+fn eq_mismatched_variants_yields_bottom() {
+    let mut b = Builder::new();
+    let eq = b.pref(BuiltinId::Eq);
+    let one = b.int(1);
+    let t = b.boolean(true);
+    let prog = b.ap2(eq, one, t);
+    assert!(b.run(prog).is_bottom());
+}
+
+#[test]
+fn lt_int_int() {
+    let mut b = Builder::new();
+    let lt = b.pref(BuiltinId::Lt);
+    let one = b.int(1);
+    let two = b.int(2);
+    let prog = b.ap2(lt, one, two);
+    assert_eq!(b.run(prog), Value::Bool(true));
+}
+
+#[test]
+fn lt_char_char() {
+    let mut b = Builder::new();
+    let lt = b.pref(BuiltinId::Lt);
+    let a = lit(&mut b.arena, LitValue::Char('a'));
+    let z = lit(&mut b.arena, LitValue::Char('z'));
+    let prog = b.ap2(lt, a, z);
+    assert_eq!(b.run(prog), Value::Bool(true));
+}
+
+#[test]
+fn lt_list_lex() {
+    // [1, 2] < [1, 3]
+    let mut b = Builder::new();
+    let lt = b.pref(BuiltinId::Lt);
+    let one_a = b.int(1);
+    let two_a = b.int(2);
+    let one_b = b.int(1);
+    let three = b.int(3);
+    let xs = b.list(vec![one_a, two_a]);
+    let ys = b.list(vec![one_b, three]);
+    let prog = b.ap2(lt, xs, ys);
+    assert_eq!(b.run(prog), Value::Bool(true));
+}
+
+#[test]
+fn lt_list_prefix_smaller() {
+    // [1, 2] < [1, 2, 3] (shorter prefix sorts first)
+    let mut b = Builder::new();
+    let lt = b.pref(BuiltinId::Lt);
+    let xs_n: Vec<_> = (1..=2).map(|i| b.int(i)).collect();
+    let ys_n: Vec<_> = (1..=3).map(|i| b.int(i)).collect();
+    let xs = b.list(xs_n);
+    let ys = b.list(ys_n);
+    let prog = b.ap2(lt, xs, ys);
+    assert_eq!(b.run(prog), Value::Bool(true));
+}
+
+#[test]
+fn lt_mismatched_variants_yields_bottom() {
+    let mut b = Builder::new();
+    let lt = b.pref(BuiltinId::Lt);
+    let one = b.int(1);
+    let t = b.boolean(true);
+    let prog = b.ap2(lt, one, t);
+    assert!(b.run(prog).is_bottom());
 }
 
 // --- runtime polymorphism (no static types) ----------------------------

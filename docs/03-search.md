@@ -2,214 +2,151 @@
 
 ## Goal and framing
 
-Given a `Task` (an oracle scoring programs) and a starting state (an empty
-pool of nodes plus the task's input parameter nodes), find a node in the
-pool whose values on the training examples match the task's targets, with
-as small a program as possible, within a fixed compute budget.
+Given a `Task` (an oracle scoring programs), find a node whose values
+on the training examples match the task's targets, with as small a
+program as possible, within a fixed compute budget.
 
-We construct programs **bottom-up**: each search step grows the pool by one
-typed node, formed by combining nodes already in the pool or by introducing
-a literal / primitive reference. Every node, the moment it joins the pool,
-has a concrete value per training example, which the neural policy uses to
-score candidates. This is the dominant framing in modern PBE literature
-(BUSTLE, DeepCoder, etc.) and the framing the network architecture in
-[02-neural.md](./02-neural.md) is designed around.
+We construct programs **bottom-up**: each step grows a pool by one
+node, formed either from a literal, a primitive reference, or an
+`App(f, a)` of two pool nodes. Every node, the moment it joins the
+pool, has a concrete value per training example, which the network
+(in M4 and onwards) uses to score candidates. Solution detection is a
+free side-effect of evaluating each candidate: the moment its runtime
+values match the task's expected outputs on every example, we're done.
+`Value::PartialEq` is variant-strict, so value-equality alone is
+sound.
 
-We do not maintain a partial program with holes. The pool is a multiset of
-fully-formed, evaluable nodes, and the program is "wherever in the pool a
-solving node appears."
+There is no partial program with holes. The pool is a set of
+fully-formed evaluable nodes, and a "solution" is any pool node whose
+values match the task's targets.
 
-## State and actions
-
-```rust
-pub struct SearchState {
-    pub arena: Arena,                 // shared, hash-consed, append-only
-    pub pool:  HashSet<NodeId>,       // every node currently available
-    pub size:  u32,                   // |pool|
-    pub log_prior: f32,               // sum of log π over actions taken so far
-    pub task_id: TaskId,
-    pub examples: Vec<(Value, Value)>,// (input, target)
-}
-
-pub enum Action {
-    /// Introduce a literal of given type/value. (Includes "literal copied
-    /// from the task's examples", which is a separate proposal stream.)
-    Literal(LitValue),
-
-    /// Introduce a reference to a primitive (or library entry).
-    PrimRef(PrimId),
-
-    /// Apply one pool node to another. Both must already be in the pool;
-    /// `func` must have a function type whose argument unifies with `arg`'s
-    /// type.
-    Apply { func: NodeId, arg: NodeId },
-}
-```
-
-The starting state contains the task's parameter nodes (one `Param` of the
-goal-type's argument) and nothing else. The first few actions seed the pool
-with primitive refs and literals; later actions assemble them via `Apply`.
-
-## Action enumeration
+## State
 
 ```rust
-pub trait ActionEnumerator {
-    fn admissible(&self, state: &SearchState, lib: &Library) -> Vec<Action>;
+pub struct Pool {
+    entries: Vec<Entry>,
+    by_node: FxHashMap<NodeId, usize>,   // hash-cons-canonical dedup
+    by_size: Vec<Vec<usize>>,            // entries indexed by program size
+}
+
+pub struct Entry {
+    node:   NodeId,
+    size:   u32,
+    values: Vec<Value>,                  // one per task example
 }
 ```
 
-For a state with `m` pool nodes:
+The pool is a single growing structure shared across all enumeration
+steps; it is not cloned per beam-state.
 
-- **Literals**: a small fixed seed set (`0, 1, true, false, [], …`)
-  plus a *value-copy* proposal stream — every distinct value that
-  appears in the task's example inputs/outputs.
-- **Primitive refs**: every primitive in the library.
-- **Apply**: every `(f, a)` pair from the pool. The language has no
-  static type system (see `01-language.md`), so construction always
-  succeeds; mismatched pairs surface as `Value::Bottom` at evaluation
-  time and are dropped via `drop_all_bottom` or collapsed via
-  observational-equivalence dedup.
+## Actions
 
-Hash-cons-canonical pool: any candidate whose `NodeId` already exists
-is filtered out at zero cost.
+Three action shapes seed and grow the pool:
 
-## Scoring candidates
+- **Literal** — a small fixed seed set (`0`, `1`, plus anything the
+  caller passes via `SearchConfig::literal_seeds`). Future work will
+  add value-copy proposals from the task's examples.
+- **PrimRef** — every primitive in the library, added once at size 1.
+- **App** — every `(f, a)` pair from the pool. Without a static type
+  system, construction always succeeds; mismatched runtime types
+  surface as `Value::Bottom` after evaluation.
 
-For each admissible action, we materialise the candidate node into the
-arena (cheap — hash-cons may even return an existing id), compute its
-values on the task's examples (one primitive call per example), then ask
-the network to score it. See [02-neural.md](./02-neural.md) for the
-network details.
+Two filters reject candidates before they reach the pool:
 
-The network scores are batched across all candidates in one forward pass.
-Action priors `log π(a | state)` flow back into the search priority.
+- **Hash-cons identity.** Any `App(f, a)` whose `NodeId` already
+  exists in the pool is filtered out at zero cost.
+- **Bottom values.** Any candidate whose runtime values contain
+  `Bottom` on at least one example is dropped. `apply` propagates
+  `Bottom` strictly on either side, so a single `Bottom` at any
+  example position taints every composition through that entry; and
+  `values_match` rejects any `Bottom` in the candidate's values. Such
+  an entry is therefore incapable of being on a solution path —
+  filtering it out is a logical implication of the pipeline, not a
+  speed heuristic.
 
-## Algorithm: best-first beam (default)
+Beyond these two structural filters there is no value-based pruning;
+search speed comes from the M4 neural prior.
+
+## Algorithm
+
+Size-iterative enumeration:
 
 ```
-queue ← { initial_state }                           # priority = 0
-while budget remains and queue not empty:
-    s ← pop max priority
-    actions ← enumerate(s)
-    eval each candidate's values; check for solution
-        if any candidate solves the task: return it (smallest one if many)
-    log_πs ← Policy.score(s, candidates)            # one batched NN call
-    for (a, lp) in zip(actions, log_πs):
-        s' ← apply(s, a)
-        if s'.size > size_limit: continue
-        priority' ← s.log_prior + lp - α · s'.size  # MDL term
-        queue.push(s', priority')
+seed pool with Param(0), literal seeds, every PrimRef
+for size in 2..=max_program_size:
+    for (k_f, k_a) with k_f + k_a + 1 == size:
+        for each f in pool entries of size k_f:
+            for each a in pool entries of size k_a:
+                node ← arena.intern(App(f, a))
+                if node already in pool: skip
+                values ← apply(f.values, a.values, fuel) per example
+                if values match expected: return node
+                add (node, size, values) to pool
 return None
 ```
 
-Notes:
+The time budget and `max_pool_size` are checked periodically inside
+the inner loop; either triggers a graceful early return.
 
-- "Solution check" is a free side-effect of evaluating each candidate.
-  The moment a candidate's runtime values match the task's expected
-  outputs on every example, we're done. (`Value::PartialEq` is
-  type-strict, so value-equality alone is sufficient — there's no
-  need for a separate type check.) This is the bottom-up design's
-  biggest single ergonomic win over top-down.
-- We do not call the value head every step; reserved for MCTS or for "give
-  up" pruning.
-- The size penalty `α · |pool|` enforces the MDL prior at search time.
+## Solution check
 
-## Algorithm: PUCT MCTS (option B)
+`values_match(values, expected)` is the only test:
 
-Replace the single best-first queue with the standard AlphaZero PUCT tree.
-Rollouts walk down to a leaf (continuing actions until a budget cap), the
-value head returns an estimate (or rollouts use the policy as a default
-policy and we evaluate at the end), and we back up.
+- lengths match,
+- no `Bottom` in values,
+- `values == expected` element-wise via `Value::PartialEq`.
 
-In bottom-up search this is straightforward: nodes in the search tree are
-`SearchState`s, edges are `Action`s, and the tree depth equals program
-size. We expect this to be most useful for harder tasks where the value
-head can prune large branches.
+There's no separate type check; `PartialEq` is variant-strict so
+`Int(0)` ≠ `List([])` etc.
 
-## Sharing across the pool
+## Lazy `if` and incremental apply
 
-Because the arena is hash-consed, two semantically identical candidate
-nodes collapse to the same `NodeId`. So:
+The pool's values for an `App(f, a)` candidate are computed by
+`apply(f.values[i], a.values[i], …)` per example, rather than by a
+fresh `eval(arena, lib, candidate, …)`. This is O(1) per example per
+add but does not preserve the lazy-`if` short-circuit that `eval`
+applies when an entire `if cond then else` chain sits at the apex of
+three `App`s. A candidate of that exact shape with one `Bottom`-valued
+branch will Bottom-propagate in the pool view; the solution-validator
+path uses `eval` and gets it right.
 
-- **Pool is a set, not a list**: adding a structurally-equal duplicate is a
-  no-op; that branch of the tree is pruned automatically.
-- **Sub-results are reused**: a node like `add 1 2` constructed early is
-  available as an argument forever after, with no recomputation.
-- **Library entries plug in identically**: a primitive ref is just a node
-  in the pool; the search uses it via `Apply` like any other node.
+## Sharing
 
-## Policy / value training data
-
-Every search produces a *trajectory*: the ordered sequence of actions taken
-on each (winning and losing) branch.
-
-```rust
-pub struct Trajectory {
-    pub task_id:  TaskId,
-    pub steps:    Vec<TrajectoryStep>,
-    pub solved:   bool,
-}
-
-pub struct TrajectoryStep {
-    pub state_hash:        u64,                 // for debugging/dedup
-    pub action_taken:      Action,
-    pub action_log_prior:  f32,
-    pub on_winning_path:   bool,                // value target
-    pub candidate_count:   u16,                 // for diagnostics
-}
-```
-
-`training` ingests these to train the network — see
-[06-training.md](./06-training.md).
-
-## Pruning beyond Apply
-
-The M2 search already ships:
-
-- **Observational equivalence** over runtime values. Two candidates
-  whose stored value tuples match (across all task examples) collapse
-  to one pool entry — exactly BUSTLE's "obs-eq" prune. This is the
-  largest practical speedup available without a neural prior.
-- **Probe-based obs-eq** for closure-typed candidates: apply each
-  closure to its corresponding example input and dedup on the result.
-  Soundness caveat documented in `decisions/m2-search-tasks.md` §4
-  and `decisions/m2-strip-static-types.md`.
-- **`drop_all_bottom`**: any candidate whose runtime values are all
-  `Bottom` is skipped (it can't be a solution and can't usefully
-  compose).
-- **Closure-as-`f` prefilter**: any pool entry whose values contain
-  no closure is skipped as an `f`-side App argument (applying a
-  non-function produces `Bottom`).
-
-A future addition once the system has actually run on more tasks:
-
-- **Reachability**: drop any candidate whose runtime *value shape*
-  can't reach the expected output shape within the remaining budget.
-  This is the value-level analogue of the type-reachability prune we
-  considered in the typed regime; needs empirical data on which
-  shape transformations the primitive set can perform.
-
-## Parallelism
-
-- Within a search: action enumeration and candidate-evaluation are
-  embarrassingly parallel; policy scoring is one big batched NN call. CPU
-  parallelism for the former, GPU for the latter.
-- Across searches: different tasks within a wake phase are independent.
-  Run tasks on a thread pool; share an NN inference micro-batcher across
-  tasks so the GPU stays busy.
+The arena is hash-consed, so two semantically-identical candidates
+collapse to a single `NodeId`. The pool's `by_node` index makes the
+"is it already here?" check O(1). Library entries (built-ins now,
+learned primitives later) plug in identically: a primitive ref is just
+a node in the pool, used via `App` like any other.
 
 ## Outputs
 
 ```rust
 pub struct SearchResult {
-    pub program:    Option<NodeId>,
-    pub solved:     bool,
-    pub size:       u32,
-    pub time:       Duration,
-    pub trajectory: Trajectory,
+    pub program:         Option<NodeId>,
+    pub solved:          bool,
+    pub size:            u32,
+    pub elapsed:         Duration,
+    pub final_pool_size: usize,
+    pub stats:           SearchStats,
 }
 ```
 
-The trajectory is what `training` consumes. The program (if any) is the
-canonical id in the search arena and is portable into the library's arena
-via a fold-copy.
+`stats` carries counts of `apps_attempted`, `apps_dup_node`,
+`apps_added`, `eval_errors`, and `pool_by_size` for diagnostic use.
+
+## What lands later
+
+- **Best-first beam with non-uniform priors**, driven by the network's
+  policy head. Adds a `priority: f32` to `Entry` and a priority queue
+  on top of the pool. M4.
+- **Trajectory recording** for training (the ordered sequence of
+  actions taken on each branch). Lands alongside the network.
+- **PUCT MCTS** as a benchmark alternative to best-first.
+- **Parallelism**: action enumeration and candidate-evaluation are
+  embarrassingly parallel within a search; tasks are independent
+  across searches. Requires moving `Value` from `Rc` to `Arc` first.
+
+## Performance
+
+The trivial list bench (`cargo bench --bench trivial_list`) is the
+canonical timing reference; correctness lives in `cargo test`.
