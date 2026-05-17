@@ -244,10 +244,12 @@ pairs and across examples.
 
 ## Choice of framework
 
-Pure-Rust hand-rolled MLP + Adam. No external tensor-library dependency.
-A thin trait wall keeps the search-facing API (`q(f, a) → f32`)
-framework-agnostic so a retarget to a GPU library later is a localised
-change.
+[`candle`](https://github.com/huggingface/candle) — Hugging Face's
+pure-Rust tensor library. Gives us `Tensor`, autograd, `candle-nn`
+modules (`Linear`, `LayerNorm`, MLP), and Adam out of the box, with a
+CPU backend for development and CUDA/Metal backends available when we
+need them. A thin trait wall keeps the search-facing API
+(`q(f, a) → f32`) framework-agnostic in case we ever swap backends.
 
 Module layout (`crates/neural/`):
 
@@ -255,6 +257,5 @@ Module layout (`crates/neural/`):
 embed.rs    leaf tables, app_net, embed_value, structural / value walks
 attn.rs     cross-attention pooler over examples
 heads.rs    phi, q_head
-mlp.rs      MLP primitive + Adam
 network.rs  top-level Network: forward, train_step, cache management
 ```
