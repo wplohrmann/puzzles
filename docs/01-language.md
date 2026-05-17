@@ -27,7 +27,7 @@ What this gets us:
   level; mismatches surface only at evaluation.
 
 The trade-off: search has to evaluate candidates to discover which
-combinations Bottom-out, and library extraction (M3) constrains
+combinations Bottom-out, and library extraction (M5) constrains
 anti-unification holes by the runtime `Value` variants observed at
 hole positions rather than by static type.
 
@@ -110,7 +110,7 @@ pub struct Library {
     pub primitives: Vec<Primitive>,
     /// Storage for `Learned` primitive bodies. The evaluator routes
     /// `PrimKind::Learned { body }` through `&lib.arena`, not the
-    /// caller's program arena. Skipped on serde — M3 will need to
+    /// caller's program arena. Skipped on serde — M5 will need to
     /// wire arena round-tripping at the same time as the first
     /// Learned primitive is created.
     pub arena: Arena,

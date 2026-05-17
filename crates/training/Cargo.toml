@@ -11,3 +11,9 @@ neural = { path = "../neural" }
 search = { path = "../search" }
 library = { path = "../library" }
 tasks = { path = "../tasks" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rustc-hash = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

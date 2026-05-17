@@ -9,5 +9,19 @@ publish.workspace = true
 name = "graph-seek"
 path = "src/main.rs"
 
+[[bin]]
+name = "graph-seek-train"
+path = "src/train_main.rs"
+
+[[bin]]
+name = "graph-seek-eval"
+path = "src/eval_tuned.rs"
+
 [dependencies]
 lang = { path = "../lang" }
+neural = { path = "../neural" }
+search = { path = "../search" }
+training = { path = "../training" }
+tasks = { path = "../tasks" }
+serde = { workspace = true }
+serde_json = { workspace = true }

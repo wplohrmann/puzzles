@@ -8,8 +8,8 @@ The system is decomposed into five intentionally loosely-coupled subsystems:
 
 | # | Subsystem | Role | Crate |
 |---|-----------|------|-------|
-| 1 | **Language** | Defines programs as typed DAGs, evaluates them, hash-conses them | `lang` |
-| 2 | **Neural** | Embeds each DAG node, scores candidate edits, predicts task value | `neural` |
+| 1 | **Language** | Defines programs as DAGs, evaluates them, hash-conses them | `lang` |
+| 2 | **Neural** | Embeds each DAG node and scores candidate App pairs `q(f, a)` | `neural` |
 | 3 | **Search** | Explores the program space using neural guidance, returns programs | `search` |
 | 4 | **Library** | Mines recurring fragments and promotes them to new primitives | `library` |
 | 5 | **Tasks** | Defines what a program is supposed to do and how we score it | `tasks` |
@@ -20,8 +20,8 @@ of its own. A `cli` crate wires the binaries.
 Each subsystem talks to its neighbours through a small set of trait objects /
 serialized structs documented in its own doc file:
 
-- [01-language.md](./01-language.md): IR, types, evaluation, serialization
-- [02-neural.md](./02-neural.md): embedding network, policy/value heads, caching
+- [01-language.md](./01-language.md): IR, evaluation, serialization
+- [02-neural.md](./02-neural.md): embedding network, `q(f, a)` head, caching
 - [03-search.md](./03-search.md): search algorithm and frontier
 - [04-library.md](./04-library.md): compression and refactoring
 - [05-tasks.md](./05-tasks.md): task families and scoring
@@ -43,12 +43,12 @@ serialized structs documented in its own doc file:
         │        └──────┬──────┘
         │               │ partial programs
         │               ▼
-        │        ┌─────────────┐  output: π(action|state), V(state)
+        │        ┌─────────────┐  output: q(f, a) for App candidates
         │        │   Neural    │
         │        └──────┬──────┘
         │               │ node embeddings (cached by hash)
         │               ▼
-        │        ┌─────────────┐  output: typed DAGs, evaluation
+        │        ┌─────────────┐  output: DAGs, evaluation
         │        │  Language   │◄────────────┐
         │        └─────────────┘             │
         │                                     │ primitives, programs
@@ -79,8 +79,9 @@ shrinks even as task complexity grows.
 The following are properties we want to hold by construction so that the
 subsystems remain decoupled and we can test each in isolation:
 
-1. **Programs are typed.** `Search` and `Library` only ever produce
-   well-typed terms. Type-checking is delegated to `Language`.
+1. **No static type system.** Nodes carry only structural information;
+   mismatches surface as `Value::Bottom` at evaluation time. See
+   [01-language.md](./01-language.md).
 2. **Hash-consing is canonical.** Two structurally identical programs share
    the same `NodeId`. `Neural` keys its caches on `NodeId`/hash. `Library`
    detects duplication structurally.
@@ -95,8 +96,8 @@ subsystems remain decoupled and we can test each in isolation:
    We don't track partial-program-with-holes state; the whole pool is a
    set of complete sub-expressions, and a "solution" is any pool node
    whose values match the task's targets.
-5. **Library entries are first-class programs.** A library primitive is a
-   closed lambda term with a polytype. Adding/removing entries is a pure
+5. **Library entries are first-class programs.** A library primitive is
+   a closed term with a fixed arity. Adding/removing entries is a pure
    data update — no code generation, no recompilation.
 
 ## Why a DAG and not a tree
@@ -124,7 +125,8 @@ details.
   entry. Either is referenced from a program by a `PrimRef` node.
 - **Library** — the current set of primitives. Starts as the built-ins; grows
   with abstraction sleep.
-- **Frontier / partial program** — a program with one or more typed holes.
+- **Frontier** — the priority queue of `App(f, a)` candidates the search
+  has scored but not yet popped.
 - **Replay** — a (task, program) pair where the program was actually found by
   search and verified to solve the task.
 - **Dream / fantasy** — a (task, program) pair where the program was sampled

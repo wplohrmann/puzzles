@@ -61,43 +61,49 @@ prior's job — search-time speed is not an M2 acceptance criterion.
 Acceptance: `cargo test` passes (the search pipeline runs end-to-end
 on identity); the bench produces useful numbers as a baseline.
 
-## Milestone 3 — `library` + abstraction sleep (1 week)
+## Milestone 3 — `neural` skeleton + cache (1.5 weeks)
+
+- Framework: pure-Rust hand-rolled MLP + Adam.
+- Implement the embedding network (`app_net`, leaf tables,
+  `embed_value`), the per-example projection, the attention pooler, and
+  the `q_head`.
+- Implement the embedding caches + invalidation hook on weight-version bump.
+- Wire `q(f, a)` into search; run with random network weights.
+
+Acceptance: search runs end-to-end with random network weights, no
+correctness regressions vs Milestone 2 (the random network just adds
+useless guidance, but doesn't break anything); per-step neural cost is
+constant in pool size given a warm cache.
+
+## Milestone 4 — `training` + dreams (2 weeks)
+
+- Dream sampler (PCFG over the seed library).
+- Bottom-up trajectory extractor (canonical topo order of a dream's DAG).
+- Curriculum that ramps dream program size 1 → 13.
+- Best-first search wired through the trained `q(f, a)`.
+- Per-iteration evaluation harness against
+  `crates/search/benches/trivial_list.rs`.
+
+This is the milestone where the system first *learns*. With dreams as the
+sole training signal (no wake phase yet — wake plus library land in M5),
+the network's job is to score candidate next-nodes well enough to navigate
+the size-13 action-space cliff that un-guided enumeration hits.
+
+Acceptance: a guided search using the trained network solves every program
+in the trivial-list bench (identity, sum, head, length, add-one-to-each)
+within its current per-task time budget — including `add-one-to-each` at
+size 13, which un-guided enumeration cannot reach.
+
+## Milestone 5 — `library` + abstraction sleep (1 week)
 
 - Pattern mining, anti-unification, beam compression.
 - Audit log + serialisation.
 - Test against synthetic planted-fragment corpora.
-- Wire a one-shot abstraction sleep onto the corpus from Milestone 2.
+- Wire a one-shot abstraction sleep onto the M4 replay buffer.
 
 Acceptance: on a hand-built corpus where the optimal new primitive is
-known, the algorithm finds it; the search in Milestone 2 then solves a
-strict superset of tasks because the library is bigger.
-
-## Milestone 4 — `neural` skeleton + cache (1.5 weeks)
-
-- Choose framework (probably `tch`); set up the `Tensor` trait wall.
-- Implement the embedding network and heads.
-- Implement the embedding cache + invalidation.
-- Property test the cache equals no-cache.
-- Wire the policy head into search; run with random network weights.
-
-Acceptance: search runs end-to-end with random network weights, no
-correctness regressions vs Milestone 2 (the random network just adds
-useless guidance, but doesn't break anything); cache hit rate ≥ 90% on a
-representative search.
-
-## Milestone 5 — `training` + dreams (2 weeks)
-
-- Replay buffer, dream sampler, training loop.
-- Per-iteration evaluation harness.
-- The full wake/sleep loop, runnable end-to-end.
-- Metrics dashboard (jsonl + a tiny plotting script).
-
-This is the first iteration where the system can *learn*. Expected first
-result: on a list-task pool, pass rate climbs over the first 5 iterations,
-library grows, network policy stops being uniform.
-
-Acceptance: after 5 iterations on a 200-task list pool, pass rate is at
-least double the no-NN baseline.
+known, the algorithm finds it; the M4 search then solves a strict
+superset of tasks because the library is bigger.
 
 ## Milestone 6 — string editing tasks (1 week)
 
@@ -138,7 +144,7 @@ The areas most likely to surprise us, with mitigations:
 | Cache invalidation bugs in `neural` | High | Property test + always provide a `--no-cache` flag for differential tests |
 | Library extraction grows pathologically | Medium | Audit log + GC; cap arity; reject equivalent-to-existing primitives |
 | Float / numerical instability in eval | Medium | Defer floats until after milestone 6 |
-| `tch` ergonomic friction | Medium | Trait-bounded `Tensor` so we can swap to `burn` |
+| Hand-rolled NN gradient bugs | Medium | Numeric-gradient unit tests on every layer; small enough fan-in to spot-check |
 | ARC turns out to need totally new abstractions | High | Plan ARC as v2; v1 success criterion is list/string |
-| Replay buffer not large enough to drive learning | Medium | Dreams compensate; tune ratio |
-| Action space without static types is too large | High | M2 baseline already shows the cost; M4 neural prior is the planned mitigation |
+| Replay buffer not large enough to drive learning | Medium | Dreams compensate; tune ratio. With reordered M4, dreams are the *only* training signal until M5+ wakes — extra mitigation: curriculum ramp |
+| Action space without static types is too large | High | M2 baseline already shows the cost; M3 neural prior is the planned mitigation |

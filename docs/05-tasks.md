@@ -20,7 +20,7 @@ pub trait Task {
 
     /// A task-specific encoding for the neural task encoder. Returned as a
     /// trait object so each domain can pick its own representation.
-    /// (Added in M4 alongside the neural recogniser; the M2 trait omits it.)
+    /// (Added in M3 alongside the neural recogniser; the M2 trait omits it.)
     fn encoding(&self) -> Box<dyn TaskEncoding>;
 
     /// Deterministic id (e.g. for replay logs).

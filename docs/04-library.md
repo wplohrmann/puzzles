@@ -44,12 +44,9 @@ candidates per iteration, which is what beam search wants.
 
 #### Anti-unification without static types
 
-The original design used type-driven anti-unification: holes were
-constrained by the polytypes of the sub-trees they replaced, so two
-positions with incompatible types couldn't unify into the same hole.
-Without a static type system (M2 onwards), we drop that.
-
-Two compensating signals are available at no extra cost:
+Holes are not constrained by static types. Two signals stand in for the
+soundness a type system would have provided, both available at no
+extra cost:
 
 - **Runtime-value shape.** Every program in the replay buffer was
   evaluated against its task's example inputs during search. The
@@ -62,8 +59,8 @@ Two compensating signals are available at no extra cost:
   into the corpus, produces `Bottom` more often than it doesn't is
   almost certainly an over-generalised hole. Score it down.
 
-Both checks are cheap and replace the structural soundness that types
-used to provide.
+Both checks are cheap and stand in for the structural soundness that a
+type system would provide.
 
 ### Step 2 — Score each candidate
 
@@ -161,9 +158,9 @@ A few guardrails worth designing in early:
   specific to be reused.
 - **Reject equivalent entries**: if a candidate's body produces the
   same runtime values as an existing primitive (or a curried partial
-  application of one) on a fixed probe-input set, drop it. (With
-  static types removed, η/β-equivalence has to be tested
-  observationally rather than structurally.)
+  application of one) on a fixed probe-input set, drop it.
+  η/β-equivalence is tested observationally on probe inputs, not
+  structurally.
 - **Periodic library garbage collection**: once per N abstraction sleeps,
   drop primitives whose usage in the replay buffer fell below a threshold.
   Otherwise the library accumulates dead weight from earlier domains.

@@ -58,33 +58,60 @@ something sensible. ("Today's dreams added `flip`, `compose-three`, and
 
 Two sub-phases that share an optimiser step:
 
-1. **Replay training.** Each `(task, program, trajectory)` in the buffer
-   gives a sequence of `(state, candidates, action_taken,
-   on-winning-path?)` tuples. Policy target: one-hot on the action taken
-   at each step on the winning path; the same step on losing branches is
-   not used as a positive policy example but does feed the value target.
-   Value target: 1 on the winning path, 0 elsewhere.
-2. **Dream training.** Sample a program ρ from the prior under the
+1. **Dream training.** Sample a program ρ from the prior under the
    current library; synthesise inputs and run ρ to produce a fake task.
-   Construct ρ in canonical bottom-up order (a topological sort of its
-   DAG nodes); each prefix is a state, the next node is the action.
-   Targets are derived the same way as replays. Dreams are essential
-   because they give the network value-encoding signal in tasks the wake
-   phase didn't reach.
+   Walk ρ in canonical bottom-up order (a topological sort of its DAG
+   nodes); each prefix is a state, the next node is the action.
+   Dreams keep the network calibrated to the prior under the current
+   library, and are the sole training signal until the wake phase
+   starts feeding the replay buffer.
+2. **Replay training**, once the wake phase produces solved-search
+   trajectories. These give higher-quality (task, program, trajectory)
+   tuples than dreams — the search's actual exploration was hard, so
+   the training signal is sharp. Mixed with dreams in a tunable ratio.
 
-The two sub-phases are mixed in a 1:1 (or 1:N — tunable) ratio inside each
-mini-batch so the network doesn't drift toward either.
+### Training signal from one dream
+
+For a dream `D` with bottom-up trajectory `[S_1, …, S_T]` (the topo
+sort of `D`'s DAG, restricted to non-seed nodes), at each step `t`:
+
+- `pool_t` = seeds ∪ {S_1, …, S_{t-1}}
+- `S_t = App(f_t, a_t)` for some `f_t`, `a_t` already in `pool_t`.
+- **Positive pair**: `(f_t, a_t)`.
+- **Candidate set `C_t`**: the positive plus `K` sampled negatives from
+  `pool_t × pool_t \ {(f_t, a_t)}`.
+
+The loss is softmax cross-entropy over `C_t`'s `q` logits with the
+positive pair as the target:
+
+```
+loss_t = -log( exp(q(f_t, a_t)) / Σ_{(f, a) ∈ C_t} exp(q(f, a)) )
+```
+
+See [`02-neural.md`](./02-neural.md) for the negative-sampling policy
+(uniform / hard mix, default `K = 64`).
+
+Backprop flows through every leaf embedding, `app_net`, the per-example
+projection `phi`, the cross-attention parameters, and the `q_head` MLP.
+Optimizer: Adam.
+
+### Loop structure
 
 ```
 for epoch in 1..dream_epochs:
-    for batch in mix(replay_loader, dream_loader, ratio):
-        loss ← policy_xent(batch) + value_mse(batch) + reg
-        loss.backward(); opt.step()
+    for batch in dream_loader:           # plus replay_loader, once wake feeds it
+        net.zero_grad()
+        for dream D in batch:
+            for step t in D's bottom-up trajectory:
+                sample C_t, accumulate loss_t
+        total_loss.backward()
+        opt.step()
 ```
 
-After dream sleep:
+After each training round:
 - `Neural.publish_weights(new_version)`
-- `EmbeddingCache.invalidate_all_for_old_version()`
+- The structural cache is dropped wholesale (model-version key changed)
+- Per-task value / target / `q` caches are dropped at task end anyway
 
 ## Evaluation phase
 
@@ -115,7 +142,7 @@ resume:
 pub struct Checkpoint {
     pub iteration: u32,
     pub library: Library,
-    pub model_weights: Vec<u8>,         // serialised tch tensors
+    pub model_weights: Vec<u8>,         // serialised network state
     pub replay_buffer: ReplayBuffer,
     pub rng_state: RngSnapshot,
     pub metrics_history: Vec<IterationMetrics>,

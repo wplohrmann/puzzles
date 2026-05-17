@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 lang = { path = "../lang" }
+neural = { path = "../neural" }
 tasks = { path = "../tasks" }
 rustc-hash = { workspace = true }
 

@@ -8,8 +8,10 @@
 //! comes from the neural prior (M4+).
 
 mod config;
+mod guided;
 mod pool;
 mod solve;
 
 pub use config::{SearchConfig, SearchResult, SearchStats};
+pub use guided::{solve_guided, GuidedConfig};
 pub use solve::solve;

@@ -7,3 +7,6 @@ publish.workspace = true
 
 [dependencies]
 lang = { path = "../lang" }
+tasks = { path = "../tasks" }
+serde = { workspace = true }
+rustc-hash = { workspace = true }
