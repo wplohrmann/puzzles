@@ -1,0 +1,56 @@
+graph-seek-complexity: levels=[1, 2, 3, 4, 5] iters_per_level=40 dreams_per_iter=8 eval_dreams=15
+  level 1 iter   1/40  loss=4.176 top1=0.00
+  level 1 iter   5/40  loss=2.187 top1=0.25
+  level 1 iter  10/40  loss=1.161 top1=0.75
+  level 1 iter  15/40  loss=0.873 top1=0.75
+  level 1 iter  20/40  loss=0.141 top1=1.00
+  level 1 iter  25/40  loss=0.061 top1=1.00
+  level 1 iter  30/40  loss=0.012 top1=1.00
+  level 1 iter  35/40  loss=0.078 top1=1.00
+  level 1 iter  40/40  loss=0.005 top1=1.00
+  level 2 iter   1/40  loss=5.386 top1=0.06
+  level 2 iter   5/40  loss=2.733 top1=0.25
+  level 2 iter  10/40  loss=1.989 top1=0.25
+  level 2 iter  15/40  loss=1.742 top1=0.44
+  level 2 iter  20/40  loss=1.320 top1=0.44
+  level 2 iter  25/40  loss=1.322 top1=0.56
+  level 2 iter  30/40  loss=1.343 top1=0.50
+  level 2 iter  35/40  loss=0.962 top1=0.62
+  level 2 iter  40/40  loss=1.179 top1=0.56
+  level 3 iter   1/40  loss=2.618 top1=0.21
+  level 3 iter   5/40  loss=2.369 top1=0.29
+  level 3 iter  10/40  loss=2.334 top1=0.33
+  level 3 iter  15/40  loss=1.958 top1=0.33
+  level 3 iter  20/40  loss=1.607 top1=0.46
+  level 3 iter  25/40  loss=1.456 top1=0.50
+  level 3 iter  30/40  loss=1.794 top1=0.38
+  level 3 iter  35/40  loss=1.867 top1=0.46
+  level 3 iter  40/40  loss=1.221 top1=0.62
+  level 4 iter   1/40  loss=2.016 top1=0.34
+  level 4 iter   5/40  loss=1.645 top1=0.38
+  level 4 iter  10/40  loss=2.235 top1=0.28
+  level 4 iter  15/40  loss=1.807 top1=0.44
+  level 4 iter  20/40  loss=1.598 top1=0.53
+  level 4 iter  25/40  loss=1.903 top1=0.47
+  level 4 iter  30/40  loss=1.547 top1=0.59
+  level 4 iter  35/40  loss=1.693 top1=0.38
+  level 4 iter  40/40  loss=1.525 top1=0.56
+  level 5 iter   1/40  loss=1.983 top1=0.43
+  level 5 iter   5/40  loss=1.389 top1=0.60
+  level 5 iter  10/40  loss=1.052 top1=0.60
+  level 5 iter  15/40  loss=0.909 top1=0.77
+  level 5 iter  20/40  loss=0.702 top1=0.73
+  level 5 iter  25/40  loss=0.655 top1=0.90
+  level 5 iter  30/40  loss=0.560 top1=0.73
+  level 5 iter  35/40  loss=0.636 top1=0.77
+  level 5 iter  40/40  loss=0.629 top1=0.80
+
+| Complexity | Iters | Loss start → end | Top-1 start → end | Eval solved | Avg size | Avg ms |
+|---:|---:|---|---|---:|---:|---:|
+| 1 | 40 | 4.176 → 0.005 | 0.00 → 1.00 | 15/15 (100%) | 3.0 | 2 |
+| 2 | 40 | 5.386 → 1.179 | 0.06 → 0.56 | 2/15 (13%) | 3.0 | 6315 |
+| 3 | 40 | 2.618 → 1.221 | 0.21 → 0.62 | 2/15 (13%) | 1.0 | 13075 |
+| 4 | 40 | 2.016 → 1.525 | 0.34 → 0.56 | 1/15 (7%) | 1.0 | 18092 |
+| 5 | 40 | 1.983 → 0.629 | 0.43 → 0.80 | 7/15 (47%) | 8.1 | 14846 |
+
+wrote table to results/curriculum_n24.md

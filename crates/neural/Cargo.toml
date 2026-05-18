@@ -10,3 +10,5 @@ lang = { path = "../lang" }
 tasks = { path = "../tasks" }
 serde = { workspace = true }
 rustc-hash = { workspace = true }
+candle-core = "0.10"
+candle-nn = "0.10"

@@ -1,22 +1,24 @@
-//! Neural network: program embeddings + policy/value heads.
+//! Neural network: program embeddings + `q(f, a | task)` scoring.
 //!
-//! See `docs/02-neural.md` and `decisions/02-pure-rust-nn.md`. Pure-Rust
-//! hand-rolled MLP + Adam; structural recurrence stubbed for v0
-//! (`decisions/03-value-only-features.md`).
+//! See `docs/02-neural.md`. One head, one loss, one signal: the same
+//! leaf tables and `app_net` embed program structure, runtime values, and
+//! task targets into a shared `R^N` space. `q(f, a)` is a scalar produced
+//! by a cross-attention pooler over the task's examples followed by an
+//! MLP head.
 
-pub mod feat;
-pub mod mlp;
+pub mod attn;
+pub mod embed;
+pub mod heads;
 pub mod network;
 pub mod rng;
+pub mod train;
 
-pub use feat::{
-    aggregate_examples, value_features, value_pair_features,
-    PAIR_FEAT_DIM, SOLO_FEAT_DIM,
+pub use attn::CrossAttn;
+pub use embed::{
+    embed_value, h_struct, h_target, h_value, signed_log1p, AppNet, EmbedCache, LeafTables,
+    ListPairIds,
 };
-pub use mlp::{adam_step, sigmoid_bce, softmax_xent, AdamCfg, Linear, Mlp};
-pub use network::{
-    cand_features, state_features, task_features, train_step, Network, NetworkCfg,
-    PolicySample, StepStats, ValueSample,
-    CAND_FEAT_DIM, POLICY_IN_DIM, STATE_DIM, TASK_FEAT_DIM, VALUE_IN_DIM,
-};
+pub use heads::{PhiMlp, QHead};
+pub use network::{scalar_f32, Network, NetworkCfg};
 pub use rng::Rng;
+pub use train::{make_optimizer, train_step, StepStats, TrainSample};

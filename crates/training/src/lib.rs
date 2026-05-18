@@ -3,14 +3,19 @@
 //! See `docs/06-training.md`. M4 ships dream-only training (no wake
 //! phase): the network is trained from synthetic programs sampled from
 //! the seed-library prior, with a curriculum that ramps program size
-//! from 1 → 13 over many iterations. See `decisions/01-roadmap-reorder.md`.
+//! from 1 → 13 over many iterations.
 
+pub mod complexity;
 pub mod curriculum;
 pub mod dream;
 pub mod eval;
 pub mod trajectory;
 pub mod train;
 
+pub use complexity::{
+    eval_complexity, sample_complexity_dreams, ComplexityCfg, ComplexityReport, ComplexityRow,
+    train_complexity_curriculum,
+};
 pub use curriculum::{Curriculum, CurriculumStage};
 pub use dream::{sample_dream, sample_program, DreamCfg, DreamTask};
 pub use eval::{bench_tasks, evaluate, BenchOutcome};

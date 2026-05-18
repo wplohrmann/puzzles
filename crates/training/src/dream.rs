@@ -218,6 +218,36 @@ pub fn sample_input_list_int(rng: &mut Rng) -> Value {
     Value::List(Rc::new(xs))
 }
 
+/// Per-dream input type. Selected once, then used across all examples.
+#[derive(Clone, Copy, Debug)]
+pub enum InputKind {
+    ListInt,
+    Int,
+    Bool,
+    PairIntInt,
+}
+
+pub fn sample_input_kind(rng: &mut Rng) -> InputKind {
+    match rng.gen_range(4) {
+        0 => InputKind::ListInt,
+        1 => InputKind::Int,
+        2 => InputKind::Bool,
+        _ => InputKind::PairIntInt,
+    }
+}
+
+pub fn sample_input_of_kind(rng: &mut Rng, kind: InputKind) -> Value {
+    match kind {
+        InputKind::ListInt => sample_input_list_int(rng),
+        InputKind::Int => Value::Int((rng.gen_range(11) as i64) - 5),
+        InputKind::Bool => Value::Bool(rng.next_f32() < 0.5),
+        InputKind::PairIntInt => Value::pair(
+            Value::Int((rng.gen_range(11) as i64) - 5),
+            Value::Int((rng.gen_range(11) as i64) - 5),
+        ),
+    }
+}
+
 /// Construct a synthetic task by sampling a program and a list of
 /// inputs, running the program, and recording (input, output) pairs.
 /// Returns `None` if too many outputs Bottom (the program is malformed
@@ -247,10 +277,19 @@ pub fn try_make_dream(
     }
     let _ = use_template;
 
+    // If the dream uses a fold-template, list inputs are the only thing
+    // that yields a non-Bottom output. Otherwise pick a random per-dream
+    // input kind so small programs that operate on Bool / Int / Pair
+    // can survive.
+    let input_kind = if use_template {
+        InputKind::ListInt
+    } else {
+        sample_input_kind(rng)
+    };
     let mut examples: Vec<(Value, Value)> = Vec::with_capacity(cfg.examples_per_dream);
     let mut bottom_count = 0;
     for _ in 0..cfg.examples_per_dream {
-        let input = sample_input_list_int(rng);
+        let input = sample_input_of_kind(rng, input_kind);
         let mut fuel = cfg.fuel;
         let env = [input.clone()];
         let v = match eval(arena, lib, program, &env, &mut fuel) {
@@ -262,12 +301,11 @@ pub fn try_make_dream(
     }
     let max_bot = (cfg.examples_per_dream as f32 * cfg.max_bottom_frac).ceil() as usize;
     if bottom_count > max_bot { return None; }
-    // Filter to non-Bottom examples; the search target is to match each
-    // example's actual output, so Bottom outputs don't make sense as
-    // training targets. If we filter and end up with too few, drop the
-    // dream.
-    examples.retain(|(_, v)| !v.is_bottom());
-    if examples.len() < 2 {
+    // Filter to non-Bottom AND non-Closure examples. The search target is
+    // value-equality on every example; closures never compare equal so a
+    // task with a closure output is permanently unsolvable.
+    examples.retain(|(_, v)| !v.is_bottom() && !matches!(v, Value::Closure(_)));
+    if examples.len() < cfg.examples_per_dream {
         return None;
     }
     // Discard "trivial" dreams whose output is constant across all

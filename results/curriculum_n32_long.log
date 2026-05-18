@@ -1,0 +1,96 @@
+graph-seek-complexity: levels=[1, 2, 3, 4, 5] iters_per_level=80 dreams_per_iter=10 eval_dreams=20
+  level 1 iter   1/80  loss=3.220 top1=0.00
+  level 1 iter   5/80  loss=1.366 top1=0.70
+  level 1 iter  10/80  loss=0.650 top1=0.90
+  level 1 iter  15/80  loss=0.137 top1=1.00
+  level 1 iter  20/80  loss=0.189 top1=0.90
+  level 1 iter  25/80  loss=0.212 top1=0.90
+  level 1 iter  30/80  loss=0.017 top1=1.00
+  level 1 iter  35/80  loss=0.000 top1=1.00
+  level 1 iter  40/80  loss=0.000 top1=1.00
+  level 1 iter  45/80  loss=0.000 top1=1.00
+  level 1 iter  50/80  loss=0.023 top1=1.00
+  level 1 iter  55/80  loss=0.020 top1=1.00
+  level 1 iter  60/80  loss=0.000 top1=1.00
+  level 1 iter  65/80  loss=0.334 top1=0.90
+  level 1 iter  70/80  loss=0.000 top1=1.00
+  level 1 iter  75/80  loss=0.017 top1=1.00
+  level 1 iter  80/80  loss=0.003 top1=1.00
+  level 2 iter   1/80  loss=10.194 top1=0.15
+  level 2 iter   5/80  loss=2.383 top1=0.25
+  level 2 iter  10/80  loss=1.211 top1=0.60
+  level 2 iter  15/80  loss=1.174 top1=0.60
+  level 2 iter  20/80  loss=1.183 top1=0.70
+  level 2 iter  25/80  loss=1.062 top1=0.70
+  level 2 iter  30/80  loss=1.161 top1=0.50
+  level 2 iter  35/80  loss=1.120 top1=0.60
+  level 2 iter  40/80  loss=0.908 top1=0.70
+  level 2 iter  45/80  loss=1.048 top1=0.60
+  level 2 iter  50/80  loss=1.122 top1=0.55
+  level 2 iter  55/80  loss=0.693 top1=0.80
+  level 2 iter  60/80  loss=0.544 top1=0.90
+  level 2 iter  65/80  loss=0.771 top1=0.60
+  level 2 iter  70/80  loss=0.942 top1=0.60
+  level 2 iter  75/80  loss=1.036 top1=0.55
+  level 2 iter  80/80  loss=0.859 top1=0.70
+  level 3 iter   1/80  loss=3.536 top1=0.27
+  level 3 iter   5/80  loss=1.862 top1=0.37
+  level 3 iter  10/80  loss=1.909 top1=0.47
+  level 3 iter  15/80  loss=1.678 top1=0.47
+  level 3 iter  20/80  loss=1.927 top1=0.30
+  level 3 iter  25/80  loss=1.721 top1=0.47
+  level 3 iter  30/80  loss=1.686 top1=0.50
+  level 3 iter  35/80  loss=1.409 top1=0.50
+  level 3 iter  40/80  loss=1.173 top1=0.57
+  level 3 iter  45/80  loss=1.083 top1=0.70
+  level 3 iter  50/80  loss=1.184 top1=0.63
+  level 3 iter  55/80  loss=1.431 top1=0.50
+  level 3 iter  60/80  loss=1.398 top1=0.53
+  level 3 iter  65/80  loss=1.096 top1=0.57
+  level 3 iter  70/80  loss=1.182 top1=0.63
+  level 3 iter  75/80  loss=1.252 top1=0.57
+  level 3 iter  80/80  loss=1.165 top1=0.53
+  level 4 iter   1/80  loss=2.292 top1=0.30
+  level 4 iter   5/80  loss=1.979 top1=0.32
+  level 4 iter  10/80  loss=2.005 top1=0.35
+  level 4 iter  15/80  loss=1.667 top1=0.38
+  level 4 iter  20/80  loss=1.726 top1=0.38
+  level 4 iter  25/80  loss=1.754 top1=0.40
+  level 4 iter  30/80  loss=1.580 top1=0.47
+  level 4 iter  35/80  loss=1.360 top1=0.57
+  level 4 iter  40/80  loss=1.340 top1=0.55
+  level 4 iter  45/80  loss=1.448 top1=0.35
+  level 4 iter  50/80  loss=1.443 top1=0.50
+  level 4 iter  55/80  loss=1.568 top1=0.47
+  level 4 iter  60/80  loss=1.473 top1=0.40
+  level 4 iter  65/80  loss=1.464 top1=0.50
+  level 4 iter  70/80  loss=1.474 top1=0.45
+  level 4 iter  75/80  loss=1.402 top1=0.45
+  level 4 iter  80/80  loss=1.521 top1=0.47
+  level 5 iter   1/80  loss=1.788 top1=0.54
+  level 5 iter   5/80  loss=1.293 top1=0.64
+  level 5 iter  10/80  loss=0.806 top1=0.70
+  level 5 iter  15/80  loss=0.788 top1=0.74
+  level 5 iter  20/80  loss=0.730 top1=0.66
+  level 5 iter  25/80  loss=0.366 top1=0.86
+  level 5 iter  30/80  loss=0.391 top1=0.88
+  level 5 iter  35/80  loss=0.290 top1=0.90
+  level 5 iter  40/80  loss=0.254 top1=0.92
+  level 5 iter  45/80  loss=0.301 top1=0.82
+  level 5 iter  50/80  loss=0.257 top1=0.88
+  level 5 iter  55/80  loss=0.337 top1=0.90
+  level 5 iter  60/80  loss=0.475 top1=0.80
+  level 5 iter  65/80  loss=0.238 top1=0.92
+  level 5 iter  70/80  loss=0.295 top1=0.90
+  level 5 iter  75/80  loss=0.222 top1=0.94
+  level 5 iter  80/80  loss=0.276 top1=0.92
+
+| Complexity | Iters | Loss start → end | Top-1 start → end | Eval solved | Avg size | Avg ms |
+|---:|---:|---|---|---:|---:|---:|
+| 1 | 80 | 3.220 → 0.003 | 0.00 → 1.00 | 20/20 (100%) | 3.0 | 2 |
+| 2 | 80 | 10.194 → 0.859 | 0.15 → 0.70 | 4/20 (20%) | 15.0 | 6289 |
+| 3 | 80 | 3.536 → 1.165 | 0.27 → 0.53 | 6/20 (30%) | 3.0 | 12484 |
+| 4 | 80 | 2.292 → 1.521 | 0.30 → 0.47 | 2/20 (10%) | 6.0 | 28301 |
+| 5 | 80 | 1.788 → 0.276 | 0.54 → 0.92 | 13/20 (65%) | 12.4 | 15238 |
+
+wrote table to results/curriculum_n32_long.md

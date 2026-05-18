@@ -1,5 +1,4 @@
-//! Periodic evaluation: run guided search on the canonical
-//! search-benchmark tasks and report per-task wall time + success.
+//! Run guided search across a set of evaluation tasks.
 
 use std::time::Duration;
 
@@ -15,7 +14,6 @@ use neural::Network;
 use search::{solve, solve_guided, GuidedConfig, SearchConfig};
 use tasks::{programmatic_task, ListExamplesTask, TaskId};
 
-/// One row of the eval table.
 #[derive(Clone, Debug)]
 pub struct BenchOutcome {
     pub name: String,
@@ -28,8 +26,6 @@ pub struct BenchOutcome {
     pub elapsed_unguided: Option<Duration>,
 }
 
-/// Build the canonical bench tasks. Standard input set, the same as the
-/// trivial-list bench harness uses.
 pub fn bench_tasks(lib: &Library) -> Vec<(String, Duration, ListExamplesTask)> {
     let mut out = Vec::new();
     let mut arena = Arena::new();
@@ -64,12 +60,7 @@ pub fn bench_tasks(lib: &Library) -> Vec<(String, Duration, ListExamplesTask)> {
     out
 }
 
-/// Run the guided search across all bench tasks and (optionally) the
-/// unguided baseline at the same time budget.
-pub fn evaluate(
-    net: &Network,
-    run_unguided_baseline: bool,
-) -> Vec<BenchOutcome> {
+pub fn evaluate(net: &Network, run_unguided_baseline: bool) -> Vec<BenchOutcome> {
     let lib = seed_builtin_library();
     let mut outcomes = Vec::new();
     for (name, budget, task) in bench_tasks(&lib) {
@@ -78,11 +69,9 @@ pub fn evaluate(
             max_program_size: 16,
             ..SearchConfig::default()
         };
-        // Guided.
         let mut a = Arena::new();
         let r = solve_guided(&mut a, &lib, &task, &cfg, net, &GuidedConfig::default());
 
-        // Unguided.
         let (solved_u, size_u, elapsed_u) = if run_unguided_baseline {
             let mut a = Arena::new();
             let r = solve(&mut a, &lib, &task, &cfg);
@@ -102,9 +91,7 @@ pub fn evaluate(
     outcomes
 }
 
-fn p(lib: &Library, b: BuiltinId) -> PrimId {
-    lib.lookup(b.name()).unwrap()
-}
+fn p(lib: &Library, b: BuiltinId) -> PrimId { lib.lookup(b.name()).unwrap() }
 
 fn build_identity(arena: &mut Arena) -> lang::arena::NodeId { param(arena, 0) }
 

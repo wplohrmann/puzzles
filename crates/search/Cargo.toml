@@ -10,6 +10,7 @@ lang = { path = "../lang" }
 neural = { path = "../neural" }
 tasks = { path = "../tasks" }
 rustc-hash = { workspace = true }
+candle-core = "0.10"
 
 [[bench]]
 name = "trivial_list"
