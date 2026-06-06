@@ -33,6 +33,11 @@ pub struct StepStats {
     pub loss: f32,
     pub samples: usize,
     pub positive_top1: f32,
+    /// Per-sample correctness (parallel to the input `samples` slice).
+    /// `true` if the positive pair had the highest logit. Callers that
+    /// want bucketed top-1 (e.g. only on samples from C=k dreams)
+    /// filter this against their own per-sample tags.
+    pub per_sample_correct: Vec<bool>,
 }
 
 /// One optimizer step over a batch of samples. Each sample contributes
@@ -51,9 +56,11 @@ pub fn train_step(
     let mut total_loss: Option<Tensor> = None;
     let mut sample_count = 0usize;
     let mut correct_top1 = 0usize;
+    let mut per_sample_correct: Vec<bool> = Vec::with_capacity(samples.len());
 
     for (sample, arena, lib) in samples {
         if sample.candidates.is_empty() {
+            per_sample_correct.push(false);
             continue;
         }
         // Per-sample cache: a fresh one each time so old graph nodes
@@ -76,7 +83,9 @@ pub fn train_step(
         for (i, &v) in logit_values.iter().enumerate() {
             if v > best_val { best_val = v; best_idx = i; }
         }
-        if best_idx == sample.positive_idx { correct_top1 += 1; }
+        let is_correct = best_idx == sample.positive_idx;
+        if is_correct { correct_top1 += 1; }
+        per_sample_correct.push(is_correct);
 
         // Numerically-stable log-sum-exp.
         let stacked2 = stacked.unsqueeze(0)?; // (1, C)
@@ -110,6 +119,7 @@ pub fn train_step(
         loss: scalar_loss,
         samples: sample_count,
         positive_top1: correct_top1 as f32 / sample_count as f32,
+        per_sample_correct,
     })
 }
 

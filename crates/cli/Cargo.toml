@@ -9,6 +9,10 @@ publish.workspace = true
 name = "graph-seek-complexity"
 path = "src/complexity_main.rs"
 
+[[bin]]
+name = "graph-seek-bench-batch"
+path = "src/bench_batch.rs"
+
 [dependencies]
 lang = { path = "../lang" }
 neural = { path = "../neural" }
@@ -17,3 +21,5 @@ training = { path = "../training" }
 tasks = { path = "../tasks" }
 candle-core = "0.10"
 candle-nn = "0.10"
+indicatif = "0.17"
+libc = "0.2"

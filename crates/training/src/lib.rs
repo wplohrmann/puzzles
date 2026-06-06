@@ -13,7 +13,8 @@ pub mod trajectory;
 pub mod train;
 
 pub use complexity::{
-    eval_complexity, sample_complexity_dreams, ComplexityCfg, ComplexityReport, ComplexityRow,
+    eval_complexity, next_top1_target, sample_complexity_dreams, wilson_lcb,
+    ComplexityCfg, ComplexityReport, ComplexityRow, CurriculumEvent,
     train_complexity_curriculum,
 };
 pub use curriculum::{Curriculum, CurriculumStage};
