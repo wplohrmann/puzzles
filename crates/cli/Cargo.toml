@@ -17,6 +17,10 @@ path = "src/bench_batch.rs"
 name = "graph-seek-show-dreams"
 path = "src/show_dreams.rs"
 
+[[bin]]
+name = "graph-seek-self-play"
+path = "src/self_play_main.rs"
+
 [dependencies]
 lang = { path = "../lang" }
 neural = { path = "../neural" }
