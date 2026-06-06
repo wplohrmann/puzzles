@@ -35,13 +35,27 @@ pub struct AcLossOutputs {
     /// `None` iff the trajectory had no solution (we skip actor
     /// updates for failed searches).
     pub actor_loss: Option<Tensor>,
-    /// Sum of per-step `(V(n_t) − C_t)²` across the trajectory. Always
-    /// present (trains on every step, solved or not).
-    pub value_loss: Tensor,
+    /// Sum of per-step `(V(n_t) − C_t)²` across the trajectory.
+    /// `None` when the caller uses a constant baseline (e.g., the
+    /// poser's EMA baseline doesn't train the value head).
+    pub value_loss: Option<Tensor>,
     /// Per-trajectory diagnostics.
     pub mean_entropy: f32,
     pub mean_advantage: f32,
     pub num_steps: usize,
+}
+
+/// Baseline strategy for advantage estimation.
+#[derive(Clone, Copy, Debug)]
+pub enum Baseline {
+    /// Use the network's value head V(created_node). Produces a
+    /// value_loss term (MSE against `C_t`) that trains the head.
+    ValueHead,
+    /// Use a constant scalar (e.g. an EMA of recent rewards). No
+    /// value_loss is produced — the value head is not consulted at
+    /// all. Used for the poser, where the trajectory is short and a
+    /// per-task learned baseline isn't worth the variance reduction.
+    Constant(f32),
 }
 
 /// Configuration knobs for the actor-critic loss.
@@ -82,6 +96,7 @@ pub fn actor_critic_loss(
     trajectory: &Trajectory,
     reward: f32,
     head: ScoringHead,
+    baseline: Baseline,
     stop_grad_trunk: bool,
     inputs: &[Value],
     targets: Option<&[Value]>,
@@ -171,14 +186,23 @@ pub fn actor_critic_loss(
         let entropy_val: f32 = scalar(&entropy_t)?;
         entropy_sum += entropy_val;
 
-        // Value head: V(created_node). Action-conditional baseline.
-        let v_t = net.value_score(step.created_node, arena, cache)?.sum_all()?; // 0-d
-
-        // Advantage = C_t − V(n_t).detach(). Detach baseline so the
-        // policy term doesn't push gradient through the value head
-        // (the value head learns from its own MSE loss).
-        let c_t_t = Tensor::new(c_t, device)?; // 0-d
-        let advantage = (c_t_t - v_t.detach())?; // 0-d
+        // Baseline. Either learned (value head, on `created_node`) or
+        // a fixed scalar (EMA). The advantage uses the *detached*
+        // baseline value so policy gradient doesn't push through it.
+        let (advantage, value_for_loss) = match baseline {
+            Baseline::ValueHead => {
+                let v_t = net
+                    .value_score(step.created_node, arena, cache)?
+                    .sum_all()?; // 0-d
+                let c_t_scalar = Tensor::new(c_t, device)?;
+                let adv = (c_t_scalar - v_t.detach())?;
+                (adv, Some(v_t))
+            }
+            Baseline::Constant(b) => {
+                let adv = Tensor::new(c_t - b, device)?;
+                (adv, None)
+            }
+        };
         let advantage_val: f32 = scalar(&advantage)?;
         advantage_sum += advantage_val;
 
@@ -191,14 +215,20 @@ pub fn actor_critic_loss(
             actor_terms.push(step_actor);
         }
 
-        // Value loss: MSE against C_t. Always.
-        let c_t_target = Tensor::new(c_t, device)?; // 0-d
-        let diff = (v_t - c_t_target)?; // 0-d
-        let v_loss_t = diff.mul(&diff)?; // 0-d
-        value_terms.push(v_loss_t);
+        // Value loss: only when using ValueHead baseline.
+        if let Some(v_t) = value_for_loss {
+            let c_t_target = Tensor::new(c_t, device)?;
+            let diff = (v_t - c_t_target)?;
+            let v_loss_t = diff.mul(&diff)?;
+            value_terms.push(v_loss_t);
+        }
     }
 
-    let value_loss = sum_tensors(&value_terms, device)?;
+    let value_loss = if value_terms.is_empty() {
+        None
+    } else {
+        Some(sum_tensors(&value_terms, device)?)
+    };
 
     let actor_loss = if actor_terms.is_empty() {
         None
@@ -381,7 +411,7 @@ mod tests {
         let mut cache = EmbedCache::default();
         let out = actor_critic_loss(
             &net, &arena, &lib, &traj, reward,
-            ScoringHead::Q, false,
+            ScoringHead::Q, Baseline::ValueHead, false,
             &inputs, Some(&expected),
             &AcLossCfg::default(),
             scfg.eval_fuel, &mut cache,
@@ -389,16 +419,68 @@ mod tests {
 
         assert_eq!(out.num_steps, traj.steps.len());
 
-        // Value loss should always be present and finite.
-        let v_val: f32 = out.value_loss.flatten_all().unwrap().to_vec1::<f32>().unwrap()[0];
+        let value_loss = out.value_loss.expect("ValueHead baseline produces a value_loss");
+        let v_val: f32 = value_loss.flatten_all().unwrap().to_vec1::<f32>().unwrap()[0];
         assert!(v_val.is_finite(), "non-finite value loss");
 
-        // If solved, actor loss should backprop cleanly.
         if let Some(actor) = out.actor_loss {
-            let total = (actor + out.value_loss).unwrap();
+            let total = (actor + value_loss).unwrap();
             let _grads = total.backward().expect("backward should succeed");
         } else {
-            let _grads = out.value_loss.backward().expect("value-only backward should succeed");
+            let _grads = value_loss.backward().expect("value-only backward should succeed");
+        }
+    }
+
+    /// Constant baseline (poser-style): no value_loss is produced; the
+    /// actor loss should still backprop.
+    #[test]
+    fn actor_critic_constant_baseline_no_value_loss() {
+        use candle_core::Device;
+        use lang::arena::Arena;
+        use lang::builtin::seed_builtin_library;
+        use neural::{Network, NetworkCfg, Rng};
+        use search::{
+            solve_guided_training, GuidedConfig, ScoringHead, SearchMode, TrainingCfg,
+        };
+
+        let lib = seed_builtin_library();
+        let cfg_net = NetworkCfg { n: 8, ..NetworkCfg::default() };
+        let net = Network::new(&cfg_net, &lib, Device::Cpu).unwrap();
+
+        let mut arena = Arena::new();
+        let inputs = vec![Value::Int(0)];
+
+        let scfg = search::SearchConfig {
+            time_budget: std::time::Duration::from_secs(5),
+            max_program_size: 6,
+            ..search::SearchConfig::default()
+        };
+        let gcfg = GuidedConfig::default();
+        // Force termination via stop with very few steps and high temp
+        let tcfg = TrainingCfg { top_k: 4, temperature: 5.0, max_steps: 50 };
+        let mut rng = Rng::new(11);
+
+        let traj = solve_guided_training(
+            &mut arena, &lib, &scfg, &net, &gcfg,
+            ScoringHead::Poser, SearchMode::Construct,
+            &inputs, None, &tcfg, &mut rng,
+        );
+
+        if traj.steps.is_empty() { return; }
+
+        let reward = 0.3; // arbitrary
+        let mut cache = EmbedCache::default();
+        let out = actor_critic_loss(
+            &net, &arena, &lib, &traj, reward,
+            ScoringHead::Poser, Baseline::Constant(0.1), true,
+            &inputs, None,
+            &AcLossCfg::default(),
+            scfg.eval_fuel, &mut cache,
+        ).unwrap();
+
+        assert!(out.value_loss.is_none(), "Constant baseline should produce no value_loss");
+        if let Some(actor) = out.actor_loss {
+            let _grads = actor.backward().expect("poser actor backward should succeed");
         }
     }
 }
