@@ -343,11 +343,14 @@ fn exec_builtin(
             let gx = apply(arena, lib, g, x, fuel)?;
             apply(arena, lib, f, gx, fuel)
         }
-        // `stop` is the identity. The poser-search picks `App(stop, n)`
-        // out of the frontier as a termination signal; evaluating it
-        // here just returns `n`'s value so embeddings of `App(stop, n)`
-        // remain meaningful (= same I/O as `n`).
-        Stop => Ok(args[0].clone()),
+        // `stop` is a *search-time sentinel*, not a runtime function.
+        // The poser-search picks `App(stop, n)` to terminate
+        // construction and returns `n` as the program — `n` doesn't
+        // contain `stop` anywhere. If we ever reach this branch at
+        // eval time, the search has constructed a program with a
+        // nested stop (i.e. stop in non-outer position), which is a
+        // bug. Return Bottom with a clear marker.
+        Stop => Ok(Value::bottom("stop reached at eval — search bug")),
     }
 }
 

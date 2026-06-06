@@ -13,6 +13,10 @@ path = "src/show_dreams.rs"
 name = "graph-seek-self-play"
 path = "src/self_play_main.rs"
 
+[[bin]]
+name = "graph-seek-show-poser"
+path = "src/show_poser.rs"
+
 [dependencies]
 lang = { path = "../lang" }
 neural = { path = "../neural" }

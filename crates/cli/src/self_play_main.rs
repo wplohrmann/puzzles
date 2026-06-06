@@ -46,6 +46,7 @@ struct Args {
     out: Option<PathBuf>,
     save_model: Option<PathBuf>,
     poser_stop_bias: f32,
+    use_gold_only: bool,
 }
 
 impl Default for Args {
@@ -74,6 +75,7 @@ impl Default for Args {
             out: None,
             save_model: None,
             poser_stop_bias: 1.0,
+            use_gold_only: false,
         }
     }
 }
@@ -107,6 +109,7 @@ fn parse() -> Args {
             "--out" => { i += 1; a.out = Some(PathBuf::from(&raw[i])); }
             "--save-model" => { i += 1; a.save_model = Some(PathBuf::from(&raw[i])); }
             "--poser-stop-bias" => { i += 1; a.poser_stop_bias = raw[i].parse().unwrap(); }
+            "--use-gold-only" => { a.use_gold_only = true; }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -160,7 +163,13 @@ fn print_help() {
         Output:\n\
         --log-every N              Print stats every N iterations (default 1)\n\
         --out PATH                 Final markdown report (default stdout only)\n\
-        --save-model PATH          Save network weights at end\n"
+        --save-model PATH          Save network weights at end\n\
+        \n\
+        Modes:\n\
+        --use-gold-only            Skip the poser; sample tasks from the\n\
+                                   hand-crafted gold-standard set (arith\n\
+                                   + bool truth tables). Trains q, value,\n\
+                                   forward heads + SIGReg. Poser bypassed.\n"
     );
 }
 
@@ -203,6 +212,7 @@ fn main() {
         fuel: args.fuel,
         time_budget_secs: args.time_budget_secs,
         poser_ema_decay: args.poser_ema_decay,
+        use_gold_only: args.use_gold_only,
     };
 
     println!(

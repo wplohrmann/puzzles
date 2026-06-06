@@ -165,10 +165,16 @@ mod tests {
     }
 
     #[test]
-    fn stop_is_identity() {
+    fn stop_is_search_sentinel_only() {
+        // `stop` should never be reached at eval time — it's a
+        // search-termination marker, and the poser-search returns the
+        // *argument* of `App(stop, n)` (not the App itself) as the
+        // program. If anyone does eval `App(stop, X)`, that's a
+        // search bug and we want to see it surface as `Bottom`, not
+        // as an identity-acting primitive that masks the issue.
         use crate::arena::Arena;
         use crate::construct::{app, lit, prim_ref};
-        use crate::eval::{eval, Value};
+        use crate::eval::eval;
         use crate::ir::LitValue;
 
         let lib = seed_builtin_library();
@@ -179,6 +185,6 @@ mod tests {
         let app_stop_v = app(&mut arena, stop_ref, v);
         let mut fuel = 1_000u32;
         let out = eval(&arena, &lib, app_stop_v, &[], &mut fuel).unwrap();
-        assert_eq!(out, Value::Int(42));
+        assert!(out.is_bottom(), "expected Bottom, got {:?}", out);
     }
 }

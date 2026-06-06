@@ -157,6 +157,15 @@ pub fn solve_guided_training(
 
     seed_pool(arena, lib, cfg, inputs, &mut pool);
 
+    // Don't allow the q-search to use the `stop` primitive at all —
+    // `stop` is a sentinel only meaningful to the poser, and any
+    // q-search expansion that touches it will produce `Bottom` at
+    // eval. The frontier filter below catches it in both positions,
+    // but excluding it from the seed pool also keeps stop's
+    // `Closure(stop)` value out of unrelated apply()s. (We don't
+    // remove from the pool here because that complicates indexing;
+    // the enqueue filter is enough.)
+
     // Solve mode: a seeded pool entry might already match expected
     // (e.g. param(0) for the identity task). Detect and return
     // immediately with a zero-step trajectory — the q-search "solved"
@@ -189,7 +198,7 @@ pub fn solve_guided_training(
         for i_a in 0..initial_pool_size {
             enqueue(
                 arena, lib, &mut frontier, gcfg, &pool, i_f, i_a, inputs,
-                &target_rows, net, head, &mut cache, cfg.eval_fuel,
+                &target_rows, net, head, mode, stop_prim, &mut cache, cfg.eval_fuel,
             );
         }
     }
@@ -233,18 +242,30 @@ pub fn solve_guided_training(
         // Non-chosen go back into the frontier for future steps.
         for c in top_k_cands { frontier.push(c); }
 
-        // --- Termination: poser-search produced `App(stop, n)`.
+        // --- Termination: poser-search picked `App(stop, n)`.
+        //
+        // `stop` is a search-time sentinel — picking it ALWAYS ends
+        // construction, with `n = chosen.a_node` as the program. We
+        // don't add the App(stop, n) candidate to the pool. If `n`
+        // happens to be a leaf (or otherwise produces an
+        // invalid/trivial task at eval time), the dream just gets
+        // rejected at the self-play validation step and the poser
+        // sees zero reward — REINFORCE pushes it away from picking
+        // stop in those cases. The poser learns *when* to terminate.
         if mode == SearchMode::Construct {
             if let Some(stop) = stop_prim {
-                if let Some(n) = stop_argument(arena, chosen.node_id, stop) {
-                    let s_nodes = collect_app_nodes(arena, n);
-                    let size = arena.reachable_topo(n).len() as u32;
-                    return Trajectory {
-                        steps,
-                        s_pool: step_count,
-                        solution: Some(SolutionInfo { root: n, size, s_nodes }),
-                        elapsed: started.elapsed(),
-                    };
+                if let NodeKind::PrimRef(p) = arena.kind(chosen.f_node) {
+                    if *p == stop {
+                        let n = chosen.a_node;
+                        let s_nodes = collect_app_nodes(arena, n);
+                        let size = arena.reachable_topo(n).len() as u32;
+                        return Trajectory {
+                            steps,
+                            s_pool: step_count,
+                            solution: Some(SolutionInfo { root: n, size, s_nodes }),
+                            elapsed: started.elapsed(),
+                        };
+                    }
                 }
             }
         }
@@ -284,12 +305,12 @@ pub fn solve_guided_training(
         for x in 0..cur_pool_size {
             enqueue(
                 arena, lib, &mut frontier, gcfg, &pool, new_idx, x, inputs,
-                &target_rows, net, head, &mut cache, cfg.eval_fuel,
+                &target_rows, net, head, mode, stop_prim, &mut cache, cfg.eval_fuel,
             );
             if x != new_idx {
                 enqueue(
                     arena, lib, &mut frontier, gcfg, &pool, x, new_idx, inputs,
-                    &target_rows, net, head, &mut cache, cfg.eval_fuel,
+                    &target_rows, net, head, mode, stop_prim, &mut cache, cfg.eval_fuel,
                 );
             }
         }
@@ -365,19 +386,50 @@ fn enqueue(
     target_rows: &Tensor,
     net: &Network,
     head: ScoringHead,
+    mode: SearchMode,
+    stop_prim: Option<PrimId>,
     cache: &mut EmbedCache,
     fuel: u32,
 ) {
     let f_entry = pool.entry(f_idx);
     let a_entry = pool.entry(a_idx);
+
+    // `stop` is a sentinel; it should only ever appear in the
+    // *function* position of the outermost App. Filter the action
+    // space directly so the policy never sees illegal positions.
+    let f_is_stop = is_stop_primref(arena, f_entry.node, stop_prim);
+    let a_is_stop = is_stop_primref(arena, a_entry.node, stop_prim);
+    if a_is_stop { return; }                       // stop never in arg pos
+    if f_is_stop && mode == SearchMode::Solve { return; } // q-search ignores stop
+
     let new_node = app(arena, f_entry.node, a_entry.node);
     if pool.contains(new_node) { return; }
     let size = f_entry.size + a_entry.size + 1;
-    let values = apply_values(arena, lib, &f_entry.values, &a_entry.values, fuel);
 
-    // All-bottom expansions are not useful — drop without spending a
-    // frontier slot.
-    if values.iter().all(|v| v.is_bottom()) { return; }
+    // For stop-applications, the candidate is a termination action,
+    // not a runtime expression. Skip eval entirely — the search loop
+    // recognises `f = stop` and returns the arg as the program.
+    //
+    // The only hard validity check at search-time: X's evaluated
+    // values must not be closure or bottom. Those are fundamentally
+    // invalid task outputs because value-equality is undefined for
+    // closures (we never recover them). Everything else — leaves,
+    // constants, identities — is allowed through; they get auto-
+    // shortcut by the q-search with `r_poser = small_floor`,
+    // providing a faint but nonzero signal that "produced *some*
+    // program" is preferable to "produced nothing". The poser then
+    // learns by gradient that non-trivial programs (which earn full
+    // tent reward) are better still.
+    let values = if f_is_stop {
+        if a_entry.values.iter().any(|v| v.is_bottom() || contains_closure(v)) {
+            return;
+        }
+        Vec::new()
+    } else {
+        let values = apply_values(arena, lib, &f_entry.values, &a_entry.values, fuel);
+        if values.iter().all(|v| v.is_bottom()) { return; }
+        values
+    };
 
     let score_t = match head {
         ScoringHead::Q => net.q_score(
@@ -402,6 +454,22 @@ fn enqueue(
         size,
         values,
     });
+}
+
+fn is_stop_primref(arena: &Arena, node: NodeId, stop: Option<PrimId>) -> bool {
+    if let (Some(stop), NodeKind::PrimRef(p)) = (stop, arena.kind(node)) {
+        return *p == stop;
+    }
+    false
+}
+
+fn contains_closure(v: &Value) -> bool {
+    match v {
+        Value::Closure(_) => true,
+        Value::List(xs) => xs.iter().any(contains_closure),
+        Value::Pair(p) => contains_closure(&p.0) || contains_closure(&p.1),
+        _ => false,
+    }
 }
 
 fn seed_pool(
@@ -468,18 +536,6 @@ fn values_match(values: &[Value], expected: &[Value]) -> bool {
     if values.len() != expected.len() { return false; }
     if values.iter().any(|v| v.is_bottom()) { return false; }
     values == expected
-}
-
-/// If `node` is `App(stop, n)`, return `Some(n)`. Otherwise `None`.
-fn stop_argument(arena: &Arena, node: NodeId, stop_prim: PrimId) -> Option<NodeId> {
-    if let NodeKind::App { func, arg } = arena.kind(node) {
-        if let NodeKind::PrimRef(p) = arena.kind(*func) {
-            if *p == stop_prim {
-                return Some(*arg);
-            }
-        }
-    }
-    None
 }
 
 /// Collect every `App` NodeId reachable from `root`. This is `S_nodes`

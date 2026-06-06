@@ -47,6 +47,7 @@ use crate::actor_critic::{
     actor_critic_loss, poser_reward, searcher_reward, AcLossCfg, Baseline,
 };
 use crate::dream::{sample_input_kind, sample_input_of_kind};
+use crate::gold::sample_gold;
 
 /// Hyperparameters for one self-play iteration.
 #[derive(Clone, Debug)]
@@ -81,6 +82,10 @@ pub struct SelfPlayCfg {
     pub time_budget_secs: u64,
     /// EMA decay for the poser baseline.
     pub poser_ema_decay: f32,
+    /// If true, skip the poser entirely and draw tasks from
+    /// `gold::sample_gold`. The q-head, value-head, forward-head,
+    /// and SIGReg still train; the poser-head is bypassed.
+    pub use_gold_only: bool,
 }
 
 impl Default for SelfPlayCfg {
@@ -105,6 +110,7 @@ impl Default for SelfPlayCfg {
             fuel: 50_000,
             time_budget_secs: 30,
             poser_ema_decay: 0.99,
+            use_gold_only: false,
         }
     }
 }
@@ -251,36 +257,37 @@ pub fn train_self_play_iter(
         // computations are deduplicated.
         let mut cache = EmbedCache::default();
 
-        // --- Forward-head loss: predict h_value(App(f,a), i) for
-        // every App node in the poser's program n. Only on valid
-        // dreams (otherwise the eval can produce closures that
-        // wouldn't pass our filter anyway).
-        if *valid {
-            if let Some(poser_traj) = poser_traj {
-                if let Some(sol) = &poser_traj.solution {
-                    let n = sol.root;
-                    let topo = arena.reachable_topo(n);
-                    for node in &topo {
-                        if let NodeKind::App { func, arg } = arena.kind(*node) {
-                            for (i, input) in inputs.iter().enumerate() {
-                                let pred = net.forward_predict(
-                                    *func, *arg, i, input, &arena, lib, cfg.fuel, &mut cache,
-                                )?;
-                                let actual = neural::h_value(
-                                    *node, i, input, &arena, lib,
-                                    &net.leaves, &net.app_net, net.lp, cfg.fuel, &mut cache,
-                                )?;
-                                let target = actual.detach();
-                                let diff = (pred - target)?;
-                                // Mean over the N embedding dims keeps
-                                // each term order-1 instead of order-N.
-                                let term = diff.mul(&diff)?.mean_all()?; // 0-d
-                                sum_forward_mse += scalar(&term)?;
-                                forward_mse_count += 1;
-                                forward_terms.push(term);
-                            }
-                        }
-                    }
+        // --- Forward-head loss: self-supervised on the trunk's
+        // dynamics. For every `App` node the q-search produced, for
+        // every example, predict `h_value(App, i)` from the children's
+        // embeddings and MSE against the trunk's own (detached) value.
+        // Decoupled from any specific "ground-truth program" — works
+        // in both gold-only and self-play modes. The q-search's pool
+        // gives many more training samples than the poser's program
+        // alone, and a failed q-search still contributes here.
+        if let Some(q_traj) = q_traj {
+            let mut seen: rustc_hash::FxHashSet<lang::arena::NodeId> = Default::default();
+            for step in &q_traj.steps {
+                let node = step.created_node;
+                if !seen.insert(node) { continue; }
+                let (func, arg) = match arena.kind(node) {
+                    NodeKind::App { func, arg } => (*func, *arg),
+                    _ => continue,
+                };
+                for (i, input) in inputs.iter().enumerate() {
+                    let pred = net.forward_predict(
+                        func, arg, i, input, &arena, lib, cfg.fuel, &mut cache,
+                    )?;
+                    let actual = neural::h_value(
+                        node, i, input, &arena, lib,
+                        &net.leaves, &net.app_net, net.lp, cfg.fuel, &mut cache,
+                    )?;
+                    let target = actual.detach();
+                    let diff = (pred - target)?;
+                    let term = diff.mul(&diff)?.mean_all()?; // 0-d
+                    sum_forward_mse += scalar(&term)?;
+                    forward_mse_count += 1;
+                    forward_terms.push(term);
                 }
             }
         }
@@ -410,6 +417,9 @@ fn run_one_dream(
     net: &Network,
     cfg: &SelfPlayCfg,
 ) -> DreamRecord {
+    if cfg.use_gold_only {
+        return run_one_gold_dream(arena, lib, rng, net, cfg);
+    }
     let input_kind = sample_input_kind(rng);
     let inputs: Vec<Value> = (0..cfg.examples_per_dream)
         .map(|_| sample_input_of_kind(rng, input_kind))
@@ -419,6 +429,7 @@ fn run_one_dream(
         time_budget: std::time::Duration::from_secs(cfg.time_budget_secs),
         max_program_size: cfg.training_search.max_steps,
         eval_fuel: cfg.fuel,
+        literal_seeds: literal_seed_set(),
         ..SearchConfig::default()
     };
 
@@ -486,6 +497,64 @@ fn run_one_dream(
     }
 }
 
+/// Gold-only variant of `run_one_dream`: sample task I/O directly
+/// from `gold::sample_gold`, skip the poser-search entirely, run the
+/// q-search on the sampled `(inputs, outputs)`.
+fn run_one_gold_dream(
+    arena: &mut Arena,
+    lib: &Library,
+    rng: &mut Rng,
+    net: &Network,
+    cfg: &SelfPlayCfg,
+) -> DreamRecord {
+    let task = sample_gold(rng, cfg.examples_per_dream);
+
+    let scfg = SearchConfig {
+        time_budget: std::time::Duration::from_secs(cfg.time_budget_secs),
+        max_program_size: cfg.training_search.max_steps,
+        eval_fuel: cfg.fuel,
+        literal_seeds: literal_seed_set(),
+        ..SearchConfig::default()
+    };
+
+    let mut q_train_cfg = cfg.training_search.clone();
+    q_train_cfg.max_steps = cfg.max_budget;
+
+    let q_traj = solve_guided_training(
+        arena, lib, &scfg, net, &cfg.guided,
+        ScoringHead::Q, SearchMode::Solve,
+        &task.inputs, Some(&task.outputs), &q_train_cfg, rng,
+    );
+
+    let solved = q_traj.solution.is_some();
+    let s_pool = q_traj.s_pool;
+    let s_sol = q_traj.solution.as_ref().map(|s| s.size).unwrap_or(0);
+    let r_searcher = searcher_reward(s_pool, s_sol, cfg.max_budget, cfg.alpha, solved);
+
+    DreamRecord {
+        inputs: task.inputs,
+        outputs: task.outputs,
+        valid: true,         // gold tasks are constructed valid by design
+        poser_traj: None,    // no poser involvement in gold-only mode
+        q_traj: Some(q_traj),
+        n_poser: 0,
+        r_searcher,
+        r_poser: 0.0,
+    }
+}
+
+/// Literal seeds the q-search starts with: small ints (matching the
+/// gold arith constants' range) plus the two booleans (for bool
+/// truth-table tasks).
+fn literal_seed_set() -> Vec<lang::ir::LitValue> {
+    use lang::ir::LitValue;
+    vec![
+        LitValue::Int(-3), LitValue::Int(-2), LitValue::Int(-1),
+        LitValue::Int(0), LitValue::Int(1), LitValue::Int(2), LitValue::Int(3),
+        LitValue::Bool(true), LitValue::Bool(false),
+    ]
+}
+
 /// Evaluate program `n` on each input. Returns `(outputs, valid)`.
 /// Valid means: every output is finite (not Bottom) and contains no
 /// `Closure` anywhere in its `List/Pair` tree.
@@ -509,11 +578,13 @@ fn evaluate_program(
         }
         outputs.push(v);
     }
-    // Discard trivially constant tasks (the q-search would solve them
-    // with a literal seed).
-    if !outputs.is_empty() && outputs.iter().all(|v| v == &outputs[0]) {
-        return (Vec::new(), false);
-    }
+    // We *allow* constant and identity programs through self-play
+    // validation. The q-search will pool-shortcut them (S_pool=0) so
+    // r_poser collapses to `small_floor` — tiny but nonzero. That
+    // beats rejecting them outright (r_poser=0): the poser still
+    // gets a faint "you produced something" signal, which matters at
+    // cold-start when valid non-trivial programs are vanishingly
+    // rare under a random network.
     (outputs, true)
 }
 

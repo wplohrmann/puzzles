@@ -8,6 +8,7 @@
 pub mod actor_critic;
 pub mod dream;
 pub mod eval;
+pub mod gold;
 pub mod self_play;
 
 pub use actor_critic::{
@@ -15,4 +16,5 @@ pub use actor_critic::{
 };
 pub use dream::{sample_dream, sample_program, DreamCfg, DreamTask};
 pub use eval::{bench_tasks, evaluate, BenchOutcome};
+pub use gold::{sample_gold, GoldTask};
 pub use self_play::{train_self_play_iter, EmaBaseline, SelfPlayCfg, SelfPlayStats};
