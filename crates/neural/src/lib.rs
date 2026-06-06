@@ -24,7 +24,7 @@ pub use embed::{
 };
 pub use forward_head::ForwardHead;
 pub use heads::{PhiMlp, QHead};
-pub use network::{scalar_f32, Network, NetworkCfg};
+pub use network::{scalar_f32, EmbeddedPair, Network, NetworkCfg};
 pub use poser_head::PoserHead;
 pub use rng::Rng;
 pub use sigreg::{sigreg_loss, SigRegCfg};
