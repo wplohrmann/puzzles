@@ -41,6 +41,15 @@ pub enum BuiltinId {
     K,
     /// `B f g x = f (g x)`
     B,
+
+    // Poser-construction terminator
+    /// `stop x = x`. Identity primitive. The poser-search treats
+    /// `App(stop, n)` specially: it terminates construction and
+    /// returns `n` as the final program. The q-head's search will
+    /// rarely build this (a `stop` node is a wasted node from the
+    /// searcher's perspective), but the primitive is in the shared
+    /// library so embeddings are consistent across both heads.
+    Stop,
 }
 
 impl BuiltinId {
@@ -65,6 +74,7 @@ impl BuiltinId {
             BuiltinId::Unfold => "unfold",
             BuiltinId::K => "k",
             BuiltinId::B => "b",
+            BuiltinId::Stop => "stop",
         }
     }
 
@@ -83,6 +93,7 @@ impl BuiltinId {
             BuiltinId::Unfold => 2,
             BuiltinId::K => 2,
             BuiltinId::B => 3,
+            BuiltinId::Stop => 1,
         }
     }
 }
@@ -108,6 +119,7 @@ pub const ALL_BUILTINS: &[BuiltinId] = &[
     BuiltinId::Unfold,
     BuiltinId::K,
     BuiltinId::B,
+    BuiltinId::Stop,
 ];
 
 /// Build a fresh library populated with every built-in.
@@ -149,5 +161,24 @@ mod tests {
         assert_eq!(lib.arity(lib.lookup("not").unwrap()), 1);
         assert_eq!(lib.arity(lib.lookup("k").unwrap()), 2);
         assert_eq!(lib.arity(lib.lookup("b").unwrap()), 3);
+        assert_eq!(lib.arity(lib.lookup("stop").unwrap()), 1);
+    }
+
+    #[test]
+    fn stop_is_identity() {
+        use crate::arena::Arena;
+        use crate::construct::{app, lit, prim_ref};
+        use crate::eval::{eval, Value};
+        use crate::ir::LitValue;
+
+        let lib = seed_builtin_library();
+        let mut arena = Arena::new();
+        let stop_id = lib.lookup("stop").unwrap();
+        let stop_ref = prim_ref(&mut arena, stop_id);
+        let v = lit(&mut arena, LitValue::Int(42));
+        let app_stop_v = app(&mut arena, stop_ref, v);
+        let mut fuel = 1_000u32;
+        let out = eval(&arena, &lib, app_stop_v, &[], &mut fuel).unwrap();
+        assert_eq!(out, Value::Int(42));
     }
 }

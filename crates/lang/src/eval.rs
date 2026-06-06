@@ -343,6 +343,11 @@ fn exec_builtin(
             let gx = apply(arena, lib, g, x, fuel)?;
             apply(arena, lib, f, gx, fuel)
         }
+        // `stop` is the identity. The poser-search picks `App(stop, n)`
+        // out of the frontier as a termination signal; evaluating it
+        // here just returns `n`'s value so embeddings of `App(stop, n)`
+        // remain meaningful (= same I/O as `n`).
+        Stop => Ok(args[0].clone()),
     }
 }
 
