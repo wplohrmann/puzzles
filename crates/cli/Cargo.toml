@@ -6,14 +6,6 @@ license.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "graph-seek-complexity"
-path = "src/complexity_main.rs"
-
-[[bin]]
-name = "graph-seek-bench-batch"
-path = "src/bench_batch.rs"
-
-[[bin]]
 name = "graph-seek-show-dreams"
 path = "src/show_dreams.rs"
 

@@ -28,5 +28,5 @@ pub use network::{scalar_f32, EmbeddedPair, Network, NetworkCfg};
 pub use poser_head::PoserHead;
 pub use rng::Rng;
 pub use sigreg::{sigreg_loss, SigRegCfg};
-pub use train::{make_optimizer, train_step, StepStats, TrainSample};
+pub use train::make_optimizer;
 pub use value_head::ValueHead;
