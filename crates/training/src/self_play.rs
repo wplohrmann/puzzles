@@ -189,7 +189,16 @@ pub fn train_self_play_iter(
     // - q actor + value loss (if it has a q-trajectory)
     // - poser actor loss (if it has a poser-trajectory with solution)
     // - SIGReg accumulator: h_value tensors collected via cache.
-    let mut all_loss_terms: Vec<Tensor> = Vec::new();
+    //
+    // Each loss component is collected separately and reduced to a
+    // MEAN inside its own bucket before being summed into the final
+    // loss. Without this normalisation the per-iter gradient scales
+    // with batch size and trajectory length, which spikes hard on
+    // the first iter and trashes the weights.
+    let mut forward_terms: Vec<Tensor> = Vec::new();
+    let mut q_actor_terms: Vec<Tensor> = Vec::new();
+    let mut q_value_terms: Vec<Tensor> = Vec::new();
+    let mut poser_actor_terms: Vec<Tensor> = Vec::new();
     let mut h_value_batch: Vec<Tensor> = Vec::new();
 
     let mut sum_r_searcher = 0.0f32;
@@ -263,10 +272,12 @@ pub fn train_self_play_iter(
                                 )?;
                                 let target = actual.detach();
                                 let diff = (pred - target)?;
-                                let term = diff.mul(&diff)?.sum_all()?; // 0-d
+                                // Mean over the N embedding dims keeps
+                                // each term order-1 instead of order-N.
+                                let term = diff.mul(&diff)?.mean_all()?; // 0-d
                                 sum_forward_mse += scalar(&term)?;
                                 forward_mse_count += 1;
-                                all_loss_terms.push(term);
+                                forward_terms.push(term);
                             }
                         }
                     }
@@ -283,8 +294,8 @@ pub fn train_self_play_iter(
                 inputs, Some(outputs),
                 &cfg.ac, cfg.fuel, &mut cache,
             )?;
-            if let Some(actor) = out.actor_loss { all_loss_terms.push(actor); }
-            if let Some(value) = out.value_loss { all_loss_terms.push(value); }
+            if let Some(actor) = out.actor_loss { q_actor_terms.push(actor); }
+            if let Some(value) = out.value_loss { q_value_terms.push(value); }
             sum_entropy += out.mean_entropy * out.num_steps as f32;
             entropy_div += out.num_steps;
             sum_advantage += out.mean_advantage.abs() * out.num_steps as f32;
@@ -300,7 +311,7 @@ pub fn train_self_play_iter(
                     inputs, None,
                     &cfg.ac, cfg.fuel, &mut cache,
                 )?;
-                if let Some(actor) = out.actor_loss { all_loss_terms.push(actor); }
+                if let Some(actor) = out.actor_loss { poser_actor_terms.push(actor); }
                 // No value_loss for Constant baseline.
             }
         }
@@ -319,7 +330,28 @@ pub fn train_self_play_iter(
         }
     }
 
-    // --- SIGReg: stack collected h_values into (B, N), apply loss.
+    // Reduce each per-dream-summed bucket to a *mean across dreams*.
+    // (Each `actor_critic_loss` call already produced a per-step
+    // mean; this second mean averages those per-trajectory means.)
+    let mut total_terms: Vec<Tensor> = Vec::new();
+    if !forward_terms.is_empty() {
+        let m = mean_tensors(&forward_terms)?;
+        total_terms.push(m);
+    }
+    if !q_actor_terms.is_empty() {
+        let m = mean_tensors(&q_actor_terms)?;
+        total_terms.push(m);
+    }
+    if !q_value_terms.is_empty() {
+        let m = mean_tensors(&q_value_terms)?;
+        total_terms.push(m);
+    }
+    if !poser_actor_terms.is_empty() {
+        let m = mean_tensors(&poser_actor_terms)?;
+        total_terms.push(m);
+    }
+
+    // SIGReg: stack collected h_values into (B, N), apply loss.
     if !h_value_batch.is_empty() {
         let stacked = Tensor::cat(
             &h_value_batch.iter().collect::<Vec<_>>(),
@@ -328,13 +360,13 @@ pub fn train_self_play_iter(
         let sigreg = sigreg_loss(&stacked, &cfg.sigreg)?;
         stats.sigreg_value = scalar(&sigreg)?;
         let weighted = sigreg.affine(cfg.lambda_sigreg as f64, 0.0)?;
-        all_loss_terms.push(weighted);
+        total_terms.push(weighted);
     }
 
     // --- Sum, backward, step.
-    if !all_loss_terms.is_empty() {
-        let mut acc = all_loss_terms[0].clone();
-        for t in &all_loss_terms[1..] {
+    if !total_terms.is_empty() {
+        let mut acc = total_terms[0].clone();
+        for t in &total_terms[1..] {
             acc = (acc + t)?;
         }
         stats.total_loss = scalar(&acc)?;
@@ -390,11 +422,13 @@ fn run_one_dream(
         ..SearchConfig::default()
     };
 
-    // Poser-search uses a separate max_steps cap = max_poser_nodes
-    // (its job is to construct a small program, not to brute-force
-    // through the budget).
+    // Poser-search has a separate cap. We can't make this too tight:
+    // even with the cold-start `poser_stop_bias`, the poser still
+    // has to land its sample on a stop-candidate at *some* step. At
+    // a pool of ~30 leaves the stop-fraction is small, so allow a
+    // few hundred steps.
     let mut poser_train_cfg = cfg.training_search.clone();
-    poser_train_cfg.max_steps = (cfg.max_poser_nodes * 4).max(20); // give some slack to reach the stop primitive
+    poser_train_cfg.max_steps = (cfg.max_poser_nodes * 30).max(120);
     let poser_traj = solve_guided_training(
         arena, lib, &scfg, net, &cfg.guided,
         ScoringHead::Poser, SearchMode::Construct,
@@ -495,6 +529,16 @@ fn contains_closure(v: &Value) -> bool {
 fn scalar(t: &Tensor) -> Result<f32> {
     let v: Vec<f32> = t.flatten_all()?.to_vec1()?;
     Ok(v[0])
+}
+
+/// Mean of a non-empty list of 0-d tensors.
+fn mean_tensors(ts: &[Tensor]) -> Result<Tensor> {
+    debug_assert!(!ts.is_empty());
+    let mut acc = ts[0].clone();
+    for t in &ts[1..] {
+        acc = (acc + t)?;
+    }
+    acc.affine(1.0 / ts.len() as f64, 0.0)
 }
 
 #[allow(dead_code)]

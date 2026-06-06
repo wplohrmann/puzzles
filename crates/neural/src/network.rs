@@ -8,8 +8,10 @@ use candle_core::{DType, Device, Result, Tensor, Var};
 use candle_nn::{VarBuilder, VarMap};
 
 use lang::arena::{Arena, NodeId};
+use lang::builtin::BuiltinId;
 use lang::eval::Value;
-use lang::library::Library;
+use lang::ir::NodeKind;
+use lang::library::{Library, PrimId};
 
 use crate::attn::CrossAttn;
 use crate::embed::{
@@ -36,6 +38,14 @@ pub struct NetworkCfg {
     /// Hidden width of the poser head (scores `(f, a)` candidates
     /// for the poser-search).
     pub poser_hidden: usize,
+    /// Static logit bias added to the poser-head's output when the
+    /// candidate's `f_node` is the `stop` primitive. Biases the poser
+    /// toward terminating with small programs at cold-start —
+    /// otherwise random init makes `App(stop, _)` exponentially
+    /// unlikely to come up in the search's budget. The bias is
+    /// constant (not trained); the poser head's MLP can learn to
+    /// emit a compensating negative score if it wants to override it.
+    pub poser_stop_bias: f32,
     pub lr: f64,
     pub weight_decay: f64,
 }
@@ -50,6 +60,7 @@ impl Default for NetworkCfg {
             forward_hidden: 64,
             value_hidden: 64,
             poser_hidden: 64,
+            poser_stop_bias: 3.0,
             lr: 3e-3,
             weight_decay: 0.0,
         }
@@ -71,6 +82,9 @@ pub struct Network {
     pub lp: ListPairIds,
     pub lib_size: usize,
     pub model_version: u64,
+    /// PrimId of the `stop` builtin in the library, if present.
+    /// Used by `poser_score` to apply the cold-start logit bias.
+    pub stop_prim: Option<PrimId>,
 }
 
 impl Network {
@@ -87,6 +101,7 @@ impl Network {
         let value_head = ValueHead::build(&vb.pp("value"), cfg.n, cfg.value_hidden)?;
         let poser_head = PoserHead::build(&vb.pp("poser"), cfg.n, cfg.poser_hidden)?;
         let lp = ListPairIds::from_library(lib);
+        let stop_prim = lib.lookup(BuiltinId::Stop.name());
         Ok(Self {
             cfg: *cfg,
             device,
@@ -102,6 +117,7 @@ impl Network {
             lp,
             lib_size,
             model_version: 0,
+            stop_prim,
         })
     }
 
@@ -192,6 +208,9 @@ impl Network {
 
     /// Compute `q_poser(f, a)` — scores `(f, a)` as a poser-search
     /// candidate. Same input shape as `q_score`; just different head.
+    /// Applies the constant `poser_stop_bias` when `f_node` is the
+    /// `stop` primitive — biases the poser toward producing short
+    /// `App(stop, _)` programs at cold-start.
     pub fn poser_score(
         &self,
         f_node: NodeId,
@@ -205,8 +224,20 @@ impl Network {
     ) -> Result<Tensor> {
         let ep = self.embed_pair(f_node, a_node, arena, lib, inputs, target_rows, fuel, cache)?;
         let q_in = Tensor::cat(&[&ep.ctx, &ep.hf_struct, &ep.ha_struct], 1)?;
-        let out = self.poser_head.forward(&q_in)?;
-        out.flatten_all() // (1,)
+        let out = self.poser_head.forward(&q_in)?.flatten_all()?;
+
+        // Static stop-bias: detect f_node == PrimRef(stop_prim) and
+        // add the bias constant. Same logic at sample-time (in
+        // solve_guided_training's enqueue) and at loss-time (when
+        // re-scoring candidates), so log π(a|s) is consistent.
+        if let Some(stop) = self.stop_prim {
+            if let NodeKind::PrimRef(p) = arena.kind(f_node) {
+                if *p == stop {
+                    return out.affine(1.0, self.cfg.poser_stop_bias as f64);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Compute the value head output `V(node)` — a scalar predicting

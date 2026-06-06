@@ -45,6 +45,7 @@ struct Args {
     log_every: usize,
     out: Option<PathBuf>,
     save_model: Option<PathBuf>,
+    poser_stop_bias: f32,
 }
 
 impl Default for Args {
@@ -72,6 +73,7 @@ impl Default for Args {
             log_every: 1,
             out: None,
             save_model: None,
+            poser_stop_bias: 1.0,
         }
     }
 }
@@ -104,6 +106,7 @@ fn parse() -> Args {
             "--log-every" => { i += 1; a.log_every = raw[i].parse().unwrap(); }
             "--out" => { i += 1; a.out = Some(PathBuf::from(&raw[i])); }
             "--save-model" => { i += 1; a.save_model = Some(PathBuf::from(&raw[i])); }
+            "--poser-stop-bias" => { i += 1; a.poser_stop_bias = raw[i].parse().unwrap(); }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -164,7 +167,11 @@ fn print_help() {
 fn main() {
     let args = parse();
     let lib = seed_builtin_library();
-    let net_cfg = NetworkCfg { n: args.n, ..NetworkCfg::default() };
+    let net_cfg = NetworkCfg {
+        n: args.n,
+        poser_stop_bias: args.poser_stop_bias,
+        ..NetworkCfg::default()
+    };
     let net = Network::new(&net_cfg, &lib, Device::Cpu).expect("net build");
     let mut opt = make_optimizer(&net, net_cfg.lr, net_cfg.weight_decay).expect("optimizer");
     let mut rng = Rng::new(args.seed);

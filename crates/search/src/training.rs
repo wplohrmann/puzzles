@@ -157,6 +157,31 @@ pub fn solve_guided_training(
 
     seed_pool(arena, lib, cfg, inputs, &mut pool);
 
+    // Solve mode: a seeded pool entry might already match expected
+    // (e.g. param(0) for the identity task). Detect and return
+    // immediately with a zero-step trajectory — the q-search "solved"
+    // by seeding alone, and we charge zero S_pool. Without this check
+    // a trivial task like identity would burn the full budget.
+    if mode == SearchMode::Solve {
+        if let Some(expected) = expected {
+            for entry in pool.entries.iter() {
+                if values_match(&entry.values, expected) {
+                    let s_nodes = collect_app_nodes(arena, entry.node);
+                    return Trajectory {
+                        steps: vec![],
+                        s_pool: 0,
+                        solution: Some(SolutionInfo {
+                            root: entry.node,
+                            size: entry.size,
+                            s_nodes,
+                        }),
+                        elapsed: started.elapsed(),
+                    };
+                }
+            }
+        }
+    }
+
     // Initial frontier: pairwise App over seeds.
     let mut frontier: BinaryHeap<TrainCand> = BinaryHeap::new();
     let initial_pool_size = pool.len();

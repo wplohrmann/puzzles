@@ -224,16 +224,21 @@ pub fn actor_critic_loss(
         }
     }
 
+    // Normalise both losses to *per-step means* so the gradient scale
+    // is independent of trajectory length and batch size. Otherwise
+    // long trajectories blow up the gradient and trash the weights.
     let value_loss = if value_terms.is_empty() {
         None
     } else {
-        Some(sum_tensors(&value_terms, device)?)
+        let s = sum_tensors(&value_terms, device)?;
+        Some(s.affine(1.0 / value_terms.len() as f64, 0.0)?)
     };
 
     let actor_loss = if actor_terms.is_empty() {
         None
     } else {
-        Some(sum_tensors(&actor_terms, device)?)
+        let s = sum_tensors(&actor_terms, device)?;
+        Some(s.affine(1.0 / actor_terms.len() as f64, 0.0)?)
     };
 
     let mean_entropy = if num_steps > 0 { entropy_sum / num_steps as f32 } else { 0.0 };
