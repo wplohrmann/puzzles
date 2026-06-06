@@ -60,10 +60,46 @@ Gradient-flow rationale:
   ("predict the constant 0"). SIGReg provides a second, independent
   anti-collapse pressure.
 
-A **value head** (predicts `r_searcher` from a state) is added as a
-fourth cooperative head. It is the variance-reducing baseline `V(s)` in
-the q-head's actor-critic loss. The poser uses a simpler EMA baseline
-(no value head) because its trajectories are short and low-variance.
+A **value head** (predicts per-action credit from a node embedding)
+is added as a fourth cooperative head. Specifically: V takes
+`h_struct(node)` for a single node and outputs a scalar. At each
+search step where action `a_t` creates `App(f, a)`, we use
+`V(App(f, a))` as the baseline for that step. The advantage becomes
+`C_t − V(App(f, a)).detach()`. V is trained by regressing against
+`C_t` per visited node. This is an *action-conditional* baseline —
+strictly speaking it introduces a small policy-gradient bias, but in
+practice it's a standard variance-reduction technique. No pool
+aggregation needed; just the node embedding.
+
+The poser uses a simpler EMA baseline (no value head) because its
+trajectories are short and low-variance.
+
+## Poser as a search
+
+The poser uses the **same search machinery as the q-head** — it runs
+a best-first guided search over candidate `App(f, a)` expansions,
+scoring them with the poser-head instead of the q-head. The two
+"searches" differ only in (a) which scoring head ranks the frontier
+and (b) what termination condition triggers the trajectory's end.
+
+To terminate poser-construction, the library gains a special
+primitive **`stop`**, defined with identity eval semantics: `stop(x)
+= x`. When the poser's search produces an expansion `App(stop, n)`,
+construction halts and `n` is taken as the final program for the
+dream. The poser-head is initialized with a logit bias toward
+`(stop, n)` candidates at small `N_poser`, providing the
+`<stop>`-bias cold-start.
+
+The q-head's library is the same (no need to maintain two libraries);
+the q-head will rarely pick `App(stop, n)` because doing so wastes a
+node on a no-op. If empirically the q-head misuses `stop`, we can
+strip it from the q-head's frontier candidates without affecting the
+poser.
+
+This unification means we maintain one search implementation, one
+trajectory format, and one set of training-time recording mechanics.
+The poser doesn't need a separate construction loop — it's just "run
+the search, but with the poser-head scoring".
 
 ## Reward design
 
@@ -200,12 +236,14 @@ the ~50 lines directly into a new `crates/neural/src/sigreg.rs`.
 Each iteration:
 
 1. **Sample a batch of `D` dreams** (default `D = 16`). For each:
-   - Sample N_poser ∼ Geom-truncated-to-[1, max_poser_nodes] from
-     poser-head's logits over construction steps.
-   - Poser constructs program one node at a time using its head.
-   - Generate `K` example inputs (default `K = 3`), run the poser's
-     program → I/O examples. Check validity (no nested closures, no
-     ⊥). Invalid → bail with `r_poser = 0`, no q-training data.
+   - Run the poser-search: best-first guided search scored by the
+     poser-head, sampling actions with top-K softmax (training mode).
+     The search terminates when the frontier produces `App(stop, n)`.
+     Cap at `max_poser_nodes` expansions; abandon if hit.
+   - The resulting program is `n` (the argument to `stop`).
+   - Generate `K` example inputs (default `K = 3`), run `n` → I/O
+     examples. Check validity (no nested closures, no ⊥). Invalid →
+     bail with `r_poser = 0`, no q-training data.
 2. **Run guided search** with the q-head's softmax over frontier
    candidates as the action-sampling policy (during training; argmax
    at eval). Budget = `max_budget`. Record:
@@ -230,14 +268,14 @@ Each iteration:
      internal `App(f, a)` nodes. For each, predict `h_value(App(f, a),
      i)` from `(h_struct(f), h_struct(a), h_value(f, i), h_value(a,
      i))`, loss = MSE against detached actual `h_value(App(f, a), i)`.
-   - **Value head**: for each visited state `s_t` on the search
-     trajectory, `loss_V(s_t) = (V(s_t) − C_t)²`. Trains on *every*
-     episode, solved or not — V learns "from this state, will the
-     next action plausibly land in the solution tree?".
+   - **Value head**: for each visited step `t` (action `a_t` creating
+     node `n_t = App(f, a)`), `loss_V(n_t) = (V(n_t) − C_t)²`. Trains
+     on *every* episode, solved or not — V learns "for this node, what
+     was the credit when it was created?". Action-conditional baseline.
    - **Q-head (A2C-MC actor with structural credit)**: **only
-     computed on successful trajectories.** For each visited state
-     `s_t` with chosen action `a_t`,
-     `loss_π(s_t, a_t) = −log π(a_t|s_t) · (C_t − V(s_t).detach()) − c_H · H[π(·|s_t)]`
+     computed on successful trajectories.** For each visited step `t`
+     with chosen action `a_t` (creating `n_t`),
+     `loss_π(s_t, a_t) = −log π(a_t|s_t) · (C_t − V(n_t).detach()) − c_H · H[π(·|s_t)]`
      where `H` is policy entropy and `c_H` is an entropy bonus
      (default `c_H = 0.01`). `π(·|s_t)` is the softmax over frontier
      candidates at `s_t`. Solution-tree actions get advantage
@@ -325,38 +363,49 @@ configurations, no comparison against the old training stack.
 - `crates/neural/src/forward_head.rs` — MLP head predicting
   `h_value(App(f, a), i)` from
   `(h_struct(f), h_struct(a), h_value(f, i), h_value(a, i))`.
-- `crates/neural/src/value_head.rs` — MLP head predicting `r_searcher`
-  from a state's `[ctx, h_struct(f), h_struct(a)]`.
-- `crates/neural/src/poser_head.rs` — MLP head producing logits over
-  `{leaf-of-each-kind, App, <stop>}` at each construction step,
-  conditioned on current partial-program embedding.
-- `crates/training/src/poser.rs` — poser-construction loop, REINFORCE
-  loss with EMA baseline, stop-grad at trunk.
+- `crates/neural/src/value_head.rs` — MLP head predicting per-action
+  credit. Input: `h_struct(node)` (single node, `(1, N)`). Output:
+  scalar `V(node)`.
+- `crates/neural/src/poser_head.rs` — MLP head scoring `(f, a)`
+  candidates with the same input shape as the q-head
+  (`[ctx, h_struct(f), h_struct(a)]`), trained against the poser tent
+  reward. Used as the priority function in the poser-search.
 - `crates/training/src/actor_critic.rs` — A2C-MC actor + value losses
   for the q-head (policy term) and value head (regression target),
-  computed from search trajectories.
+  computed from search trajectories. Also handles poser REINFORCE
+  with EMA baseline.
 - `crates/training/src/self_play.rs` — top-level training loop that
   composes all losses and orchestrates one iteration.
 
 **Modify:**
 
+- `crates/lang/src/builtin.rs` — add a new `Stop` builtin with
+  identity eval semantics (`stop(x) = x`). Added to the seed library
+  via `seed_builtin_library`. Used by the poser to terminate
+  construction.
 - `crates/neural/src/network.rs` — register the three new heads;
   expose forward/value/poser forward methods alongside `q_score`.
 - `crates/neural/src/train.rs` — replace `train_step` with the
   multi-loss version (forward + value + q + poser + SIGReg).
-- `crates/search/src/` — two changes to the search loop:
-  1. **Frontier dedup against pool.** When building the candidate
-     set at each step, exclude any `(f, a)` whose `App(f, a)` already
-     hash-conses to a NodeId in the pool. The policy never sees
-     redundant expansions as candidates, so they can't be sampled.
-     This keeps the action space clean (every action adds a fresh
-     node) and removes the redundant-expansion edge case from credit
-     assignment.
-  2. **Emit trajectory.** Per step: the action chosen (with the
-     NodeId of the App it produced), its `log π(a|s)`, the set of
-     alternative frontier candidates considered. On solve: the
-     solution DAG, from which we compute `S_nodes` and per-action
-     credit `C_t`.
+- `crates/search/src/` — additions to the search loop:
+  1. **Frontier dedup against pool** is already present in
+     `guided.rs` (the `pool.contains` checks at lines 120 and 210).
+     Confirm coverage when adding trajectory recording.
+  2. **New training-mode entry point.** Add
+     `solve_guided_training(arena, lib, task, cfg, scoring_head,
+     temp, max_steps)` that runs the same search but: (a) at each
+     frontier expansion, peek the top-K candidates, softmax over their
+     priorities at temperature `temp`, sample one, record
+     `log π(a|s)` and the K candidates; (b) emit a `Trajectory`
+     containing the per-step record + final outcome + `S_pool` +
+     solution DAG (if solved). The `scoring_head` argument is either
+     `q-head` (for searcher-search) or `poser-head` (for
+     poser-search). The existing `solve_guided` stays unchanged for
+     eval/argmax use.
+  3. **Stop primitive support** in the search loop: when a poser-
+     search expansion produces `App(stop, n)`, terminate construction
+     and return `n` as the program (instead of evaluating
+     `App(stop, n)` and continuing).
 - `crates/cli/src/` — replace `complexity_main.rs` with a new
   `self_play_main.rs` (`graph-seek-self-play` binary). Flags are
   the hyperparameters from the table above plus `--seed`,

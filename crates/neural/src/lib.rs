@@ -8,17 +8,25 @@
 
 pub mod attn;
 pub mod embed;
+pub mod forward_head;
 pub mod heads;
 pub mod network;
+pub mod poser_head;
 pub mod rng;
+pub mod sigreg;
 pub mod train;
+pub mod value_head;
 
 pub use attn::CrossAttn;
 pub use embed::{
     embed_value, h_struct, h_target, h_value, signed_log1p, AppNet, EmbedCache, LeafTables,
     ListPairIds,
 };
+pub use forward_head::ForwardHead;
 pub use heads::{PhiMlp, QHead};
 pub use network::{scalar_f32, Network, NetworkCfg};
+pub use poser_head::PoserHead;
 pub use rng::Rng;
+pub use sigreg::{sigreg_loss, SigRegCfg};
 pub use train::{make_optimizer, train_step, StepStats, TrainSample};
+pub use value_head::ValueHead;
