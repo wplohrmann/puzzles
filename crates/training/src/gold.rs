@@ -25,18 +25,53 @@ use neural::Rng;
 /// A task fully defined by its input/output pairs.
 #[derive(Clone, Debug)]
 pub struct GoldTask {
+    pub category: GoldCategory,
     pub inputs: Vec<Value>,
     pub outputs: Vec<Value>,
+}
+
+/// Which template a `GoldTask` was sampled from. Used to bucket
+/// diagnostics (per-category solve rate, etc.).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GoldCategory {
+    ArithUnary,
+    ArithCompose,
+    BoolTruthTable,
+}
+
+impl GoldCategory {
+    pub fn name(self) -> &'static str {
+        match self {
+            GoldCategory::ArithUnary => "arith_unary",
+            GoldCategory::ArithCompose => "arith_compose",
+            GoldCategory::BoolTruthTable => "bool_truth_table",
+        }
+    }
 }
 
 /// Sample one gold task. Picks a category uniformly, then samples
 /// within it. `k_examples` controls the example count for arithmetic
 /// tasks (boolean truth-table tasks always have 4 examples).
 pub fn sample_gold(rng: &mut Rng, k_examples: usize) -> GoldTask {
-    match rng.gen_range(3) {
-        0 => sample_arith_unary(rng, k_examples),
-        1 => sample_arith_compose(rng, k_examples),
-        _ => sample_bool_truth_table(rng),
+    let cat = match rng.gen_range(3) {
+        0 => GoldCategory::ArithUnary,
+        1 => GoldCategory::ArithCompose,
+        _ => GoldCategory::BoolTruthTable,
+    };
+    sample_gold_in_category(cat, rng, k_examples)
+}
+
+/// Sample within a fixed category — for diagnostic tools that want a
+/// balanced per-category distribution.
+pub fn sample_gold_in_category(
+    cat: GoldCategory,
+    rng: &mut Rng,
+    k_examples: usize,
+) -> GoldTask {
+    match cat {
+        GoldCategory::ArithUnary => sample_arith_unary(rng, k_examples),
+        GoldCategory::ArithCompose => sample_arith_compose(rng, k_examples),
+        GoldCategory::BoolTruthTable => sample_bool_truth_table(rng),
     }
 }
 
@@ -82,7 +117,7 @@ fn sample_arith_unary(rng: &mut Rng, k: usize) -> GoldTask {
         let x = v.as_int().expect("Int input");
         Value::Int(op.apply(x, a))
     }).collect();
-    GoldTask { inputs, outputs }
+    GoldTask { category: GoldCategory::ArithUnary, inputs, outputs }
 }
 
 fn sample_arith_compose(rng: &mut Rng, k: usize) -> GoldTask {
@@ -96,7 +131,7 @@ fn sample_arith_compose(rng: &mut Rng, k: usize) -> GoldTask {
         let y = op1.apply(x, a1);
         Value::Int(op2.apply(y, a2))
     }).collect();
-    GoldTask { inputs, outputs }
+    GoldTask { category: GoldCategory::ArithCompose, inputs, outputs }
 }
 
 /// Sample one of 16 boolean functions of two bool variables.
@@ -114,7 +149,7 @@ fn sample_bool_truth_table(rng: &mut Rng) -> GoldTask {
     let outputs: Vec<Value> = (0..4)
         .map(|i| Value::Bool(((tt >> i) & 1) == 1))
         .collect();
-    GoldTask { inputs, outputs }
+    GoldTask { category: GoldCategory::BoolTruthTable, inputs, outputs }
 }
 
 #[cfg(test)]

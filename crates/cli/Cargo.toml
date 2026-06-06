@@ -17,6 +17,10 @@ path = "src/self_play_main.rs"
 name = "graph-seek-show-poser"
 path = "src/show_poser.rs"
 
+[[bin]]
+name = "graph-seek-diag-q"
+path = "src/diag_q.rs"
+
 [dependencies]
 lang = { path = "../lang" }
 neural = { path = "../neural" }
