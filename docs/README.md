@@ -12,6 +12,7 @@ Read these in order:
 8. [07-testing.md](./07-testing.md) — testing strategy
 9. [08-roadmap.md](./08-roadmap.md) — milestones and risks
 10. [09-questions.md](./09-questions.md) — design choices to confirm + open questions
+11. [09-self-play-plan.md](./09-self-play-plan.md) — poser/searcher/forward-predictor architecture + SIGReg
 
 If you only read two: [00-overview.md](./00-overview.md) and
 [09-questions.md](./09-questions.md).

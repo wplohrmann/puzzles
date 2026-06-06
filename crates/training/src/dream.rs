@@ -301,10 +301,11 @@ pub fn try_make_dream(
     }
     let max_bot = (cfg.examples_per_dream as f32 * cfg.max_bottom_frac).ceil() as usize;
     if bottom_count > max_bot { return None; }
-    // Filter to non-Bottom AND non-Closure examples. The search target is
-    // value-equality on every example; closures never compare equal so a
-    // task with a closure output is permanently unsolvable.
-    examples.retain(|(_, v)| !v.is_bottom() && !matches!(v, Value::Closure(_)));
+    // Reject examples whose output is Bottom or contains a Closure anywhere
+    // in its List/Pair tree. Value equality has no (Closure, Closure) arm
+    // and any closure compares not-equal to anything, so even a List or
+    // Pair containing a closure is permanently unsolvable by value-equality.
+    examples.retain(|(_, v)| !v.is_bottom() && !contains_closure(v));
     if examples.len() < cfg.examples_per_dream {
         return None;
     }
@@ -315,6 +316,18 @@ pub fn try_make_dream(
         return None;
     }
     Some(DreamTask { program, examples })
+}
+
+/// True if `v` is a `Closure`, or contains one anywhere in a List/Pair
+/// tree. Used to filter dreams whose expected outputs would be
+/// permanently unsolvable by value-equality.
+fn contains_closure(v: &Value) -> bool {
+    match v {
+        Value::Closure(_) => true,
+        Value::List(xs) => xs.iter().any(contains_closure),
+        Value::Pair(p) => contains_closure(&p.0) || contains_closure(&p.1),
+        _ => false,
+    }
 }
 
 /// Sample a flat PCFG-style program, size budget concentrated near

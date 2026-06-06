@@ -13,6 +13,10 @@ path = "src/complexity_main.rs"
 name = "graph-seek-bench-batch"
 path = "src/bench_batch.rs"
 
+[[bin]]
+name = "graph-seek-show-dreams"
+path = "src/show_dreams.rs"
+
 [dependencies]
 lang = { path = "../lang" }
 neural = { path = "../neural" }
