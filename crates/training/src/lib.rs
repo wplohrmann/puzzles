@@ -5,6 +5,7 @@
 //! the seed-library prior, with a curriculum that ramps program size
 //! from 1 → 13 over many iterations.
 
+pub mod actor_critic;
 pub mod complexity;
 pub mod curriculum;
 pub mod dream;
@@ -12,6 +13,9 @@ pub mod eval;
 pub mod trajectory;
 pub mod train;
 
+pub use actor_critic::{
+    actor_critic_loss, poser_reward, searcher_reward, AcLossCfg, AcLossOutputs,
+};
 pub use complexity::{
     eval_complexity, next_top1_target, sample_complexity_dreams, wilson_lcb,
     ComplexityCfg, ComplexityReport, ComplexityRow, CurriculumEvent,
