@@ -29,7 +29,7 @@
 use candle_core::{DType, Result, Tensor};
 use candle_nn::{AdamW, Optimizer};
 
-use lang::arena::Arena;
+use lang::arena::{Arena, NodeId};
 use lang::eval::{eval, Value};
 use lang::ir::NodeKind;
 use lang::library::Library;
@@ -39,15 +39,15 @@ use neural::{
 };
 
 use search::{
-    solve_guided_training, GuidedConfig, ScoringHead, SearchConfig, SearchMode, Trajectory,
-    TrainingCfg,
+    solve_guided_teacher_forced, solve_guided_training, GuidedConfig, ScoringHead,
+    SearchConfig, SearchMode, Trajectory, TrainingCfg,
 };
 
 use crate::actor_critic::{
     actor_critic_loss, poser_reward, searcher_reward, AcLossCfg, Baseline,
 };
 use crate::dream::{sample_input_kind, sample_input_of_kind};
-use crate::gold::sample_gold;
+use crate::gold::{sample_gold, GoldCategory};
 
 /// Hyperparameters for one self-play iteration.
 #[derive(Clone, Debug)]
@@ -86,6 +86,15 @@ pub struct SelfPlayCfg {
     /// `gold::sample_gold`. The q-head, value-head, forward-head,
     /// and SIGReg still train; the poser-head is bypassed.
     pub use_gold_only: bool,
+    /// If true, when the sampled q-search fails to find a solution we
+    /// replay the search teacher-forced down the *canonical* program
+    /// (the poser's own program in self-play mode, or the gold task's
+    /// recipe in gold-only mode) and add a behaviour-cloning loss to
+    /// the q-head. This gives the node-picker policy gradient even on
+    /// dreams it can't yet solve — and self-disables on the dreams it
+    /// can. See `actor_critic_loss` called with `reward = 1.0` and a
+    /// `Constant(0.0)` baseline (advantage ≡ 1 ⇒ cross-entropy).
+    pub teacher_forcing: bool,
 }
 
 impl Default for SelfPlayCfg {
@@ -111,6 +120,7 @@ impl Default for SelfPlayCfg {
             time_budget_secs: 30,
             poser_ema_decay: 0.99,
             use_gold_only: false,
+            teacher_forcing: true,
         }
     }
 }
@@ -163,6 +173,35 @@ pub struct SelfPlayStats {
     /// Number of dreams that produced *any* training signal (had at
     /// least a non-trivial poser trajectory).
     pub usable_dreams: usize,
+    /// Number of dreams where the q-search failed but teacher forcing
+    /// successfully reconstructed the canonical program, contributing a
+    /// behaviour-cloning loss to the q-head.
+    pub bc_dreams: usize,
+    /// Mean behaviour-cloning loss (cross-entropy) across those dreams.
+    pub mean_bc_loss: f32,
+    /// Per-gold-category breakdown (gold-only mode). Empty in self-play
+    /// mode, where dreams have no category. Ordered by
+    /// `GoldCategory::ALL`.
+    pub per_category: Vec<CategoryStat>,
+}
+
+/// Per-category diagnostics for one iteration (gold-only mode).
+#[derive(Clone, Copy, Debug)]
+pub struct CategoryStat {
+    pub category: GoldCategory,
+    /// Dreams sampled from this category this iteration.
+    pub dreams: usize,
+    /// Of those, how many the sampled q-search solved on its own.
+    pub solved: usize,
+    /// Of those, how many fell back to teacher-forced behaviour cloning.
+    pub bc_fired: usize,
+}
+
+impl CategoryStat {
+    /// Fraction of this category's dreams the q-search solved.
+    pub fn solve_rate(&self) -> f32 {
+        if self.dreams == 0 { 0.0 } else { self.solved as f32 / self.dreams as f32 }
+    }
 }
 
 /// Run one training iteration. Returns per-iteration diagnostics.
@@ -205,6 +244,7 @@ pub fn train_self_play_iter(
     let mut q_actor_terms: Vec<Tensor> = Vec::new();
     let mut q_value_terms: Vec<Tensor> = Vec::new();
     let mut poser_actor_terms: Vec<Tensor> = Vec::new();
+    let mut bc_terms: Vec<Tensor> = Vec::new();
     let mut h_value_batch: Vec<Tensor> = Vec::new();
 
     let mut sum_r_searcher = 0.0f32;
@@ -222,6 +262,12 @@ pub fn train_self_play_iter(
     let mut advantage_div = 0usize;
     let mut sum_forward_mse = 0.0f32;
     let mut forward_mse_count = 0usize;
+    let mut bc_dreams = 0usize;
+    let mut sum_bc_loss = 0.0f32;
+    // Per-category (dreams, solved, bc_fired), indexed by position in
+    // `GoldCategory::ALL`. Untouched in self-play mode (category None).
+    let mut cat_acc: [(usize, usize, usize); GoldCategory::ALL.len()] =
+        [(0, 0, 0); GoldCategory::ALL.len()];
 
     for dream in &dreams {
         let DreamRecord {
@@ -230,10 +276,24 @@ pub fn train_self_play_iter(
             valid,
             poser_traj,
             q_traj,
+            bc_traj,
             n_poser,
             r_searcher,
             r_poser,
+            category,
         } = dream;
+
+        if let Some(cat) = category {
+            if let Some(i) = GoldCategory::ALL.iter().position(|c| c == cat) {
+                cat_acc[i].0 += 1;
+                if q_traj.as_ref().is_some_and(|t| t.solution.is_some()) {
+                    cat_acc[i].1 += 1;
+                }
+                if bc_traj.is_some() {
+                    cat_acc[i].2 += 1;
+                }
+            }
+        }
 
         sum_r_searcher += r_searcher;
         sum_r_poser += r_poser;
@@ -309,6 +369,27 @@ pub fn train_self_play_iter(
             advantage_div += out.num_steps;
         }
 
+        // --- Q-head behaviour-cloning loss on the teacher-forced
+        // canonical trajectory (only on dreams the sampled q-search
+        // failed). With `reward = 1.0` and a `Constant(0.0)` baseline,
+        // every forced step has advantage 1, so the actor term reduces
+        // to `mean(−log π(canonical_action))` — plain cross-entropy.
+        // No value loss (constant baseline); trunk gradient flows
+        // (cooperative head, so `stop_grad_trunk = false`).
+        if let Some(bc_traj) = bc_traj {
+            let out = actor_critic_loss(
+                net, &arena, lib, bc_traj, 1.0,
+                ScoringHead::Q, Baseline::Constant(0.0), false,
+                inputs, Some(outputs),
+                &cfg.ac, cfg.fuel, &mut cache,
+            )?;
+            if let Some(actor) = out.actor_loss {
+                sum_bc_loss += scalar(&actor)?;
+                bc_terms.push(actor);
+                bc_dreams += 1;
+            }
+        }
+
         // --- Poser-head REINFORCE loss with EMA baseline + stop-grad.
         if let Some(poser_traj) = poser_traj {
             if poser_traj.solution.is_some() {
@@ -357,6 +438,10 @@ pub fn train_self_play_iter(
         let m = mean_tensors(&poser_actor_terms)?;
         total_terms.push(m);
     }
+    if !bc_terms.is_empty() {
+        let m = mean_tensors(&bc_terms)?;
+        total_terms.push(m);
+    }
 
     // SIGReg: stack collected h_values into (B, N), apply loss.
     if !h_value_batch.is_empty() {
@@ -394,6 +479,17 @@ pub fn train_self_play_iter(
     stats.mean_advantage = if advantage_div > 0 { sum_advantage / advantage_div as f32 } else { 0.0 };
     stats.forward_mse = if forward_mse_count > 0 { sum_forward_mse / forward_mse_count as f32 } else { 0.0 };
     stats.usable_dreams = usable_count;
+    stats.bc_dreams = bc_dreams;
+    stats.mean_bc_loss = if bc_dreams > 0 { sum_bc_loss / bc_dreams as f32 } else { 0.0 };
+    stats.per_category = GoldCategory::ALL
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| cat_acc[*i].0 > 0)
+        .map(|(i, &cat)| {
+            let (dreams, solved, bc_fired) = cat_acc[i];
+            CategoryStat { category: cat, dreams, solved, bc_fired }
+        })
+        .collect();
 
     Ok(stats)
 }
@@ -405,9 +501,65 @@ struct DreamRecord {
     valid: bool,
     poser_traj: Option<Trajectory>,
     q_traj: Option<Trajectory>,
+    /// Teacher-forced trajectory down the canonical program. `Some`
+    /// only when the sampled q-search failed *and* forcing
+    /// reconstructed the program. Feeds the q-head behaviour-cloning
+    /// loss. The recorded `solution` is the canonical program itself.
+    bc_traj: Option<Trajectory>,
     n_poser: u32,
     r_searcher: f32,
     r_poser: f32,
+    /// Gold category, for per-category diagnostics. `None` in self-play
+    /// mode (poser-generated dreams have no category).
+    category: Option<GoldCategory>,
+}
+
+/// Replay a failed q-search teacher-forced down a canonical program to
+/// produce a behaviour-cloning trajectory for the q-head.
+///
+/// Returns `None` when forcing is disabled, the sampled search already
+/// solved, there's no canonical program, or forcing failed to
+/// reconstruct it (e.g. a canonical node never entered the frontier).
+/// `canonical` is the ground-truth program's root node in `arena`.
+#[allow(clippy::too_many_arguments)]
+fn teacher_force_bc(
+    arena: &mut Arena,
+    lib: &Library,
+    rng: &mut Rng,
+    net: &Network,
+    cfg: &SelfPlayCfg,
+    scfg: &SearchConfig,
+    inputs: &[Value],
+    outputs: &[Value],
+    q_solved: bool,
+    canonical: Option<NodeId>,
+) -> Option<Trajectory> {
+    if !cfg.teacher_forcing || q_solved {
+        return None;
+    }
+    let canonical = canonical?;
+    // Build order: the canonical program's App nodes, children-first.
+    let targets: Vec<NodeId> = arena
+        .reachable_topo(canonical)
+        .into_iter()
+        .filter(|&id| matches!(arena.kind(id), NodeKind::App { .. }))
+        .collect();
+    if targets.is_empty() {
+        // Canonical is a bare seed (e.g. a constant/projection); the
+        // q-search's seed-match shortcut already covers these, so there
+        // is nothing to clone.
+        return None;
+    }
+    let mut tcfg = cfg.training_search.clone();
+    // One forced expansion per target; the root terminates via
+    // value-match on its final step.
+    tcfg.max_steps = targets.len() as u32 + 1;
+    let traj = solve_guided_teacher_forced(
+        arena, lib, scfg, net, &cfg.guided, inputs, Some(outputs), &tcfg, &targets, rng,
+    );
+    // Only useful if forcing actually rebuilt the program.
+    traj.solution.as_ref()?;
+    Some(traj)
 }
 
 fn run_one_dream(
@@ -485,15 +637,24 @@ fn run_one_dream(
         s_pool, n_size, cfg.max_budget, cfg.beta, cfg.small_floor, valid, solved,
     );
 
+    // On a failed q-search, clone the poser's own program (the dream's
+    // ground truth) into the q-head via teacher forcing.
+    let canonical = if valid { n_node } else { None };
+    let bc_traj = teacher_force_bc(
+        arena, lib, rng, net, cfg, &scfg, &inputs, &outputs, solved, canonical,
+    );
+
     DreamRecord {
         inputs,
         outputs,
         valid,
         poser_traj: Some(poser_traj),
         q_traj,
+        bc_traj,
         n_poser: n_size,
         r_searcher,
         r_poser,
+        category: None,
     }
 }
 
@@ -517,6 +678,11 @@ fn run_one_gold_dream(
         ..SearchConfig::default()
     };
 
+    // Materialise the gold task's canonical program up front (interns
+    // into the shared arena; its seed leaves hash-cons with the
+    // q-search's seed pool).
+    let canonical = task.build_canonical(arena, lib);
+
     let mut q_train_cfg = cfg.training_search.clone();
     q_train_cfg.max_steps = cfg.max_budget;
 
@@ -531,15 +697,21 @@ fn run_one_gold_dream(
     let s_sol = q_traj.solution.as_ref().map(|s| s.size).unwrap_or(0);
     let r_searcher = searcher_reward(s_pool, s_sol, cfg.max_budget, cfg.alpha, solved);
 
+    let bc_traj = teacher_force_bc(
+        arena, lib, rng, net, cfg, &scfg, &task.inputs, &task.outputs, solved, canonical,
+    );
+
     DreamRecord {
         inputs: task.inputs,
         outputs: task.outputs,
         valid: true,         // gold tasks are constructed valid by design
         poser_traj: None,    // no poser involvement in gold-only mode
         q_traj: Some(q_traj),
+        bc_traj,
         n_poser: 0,
         r_searcher,
         r_poser: 0.0,
+        category: Some(task.category),
     }
 }
 
@@ -649,5 +821,37 @@ mod tests {
         assert!(stats.total_loss.is_finite(), "total loss must be finite, got {}", stats.total_loss);
         assert!(stats.mean_r_searcher >= 0.0);
         assert!(stats.mean_r_poser >= 0.0);
+    }
+
+    /// Gold-only + teacher forcing: with a random network the q-search
+    /// fails on essentially every dream, so teacher forcing should fire
+    /// and contribute behaviour-cloning signal. Verify it runs, fires,
+    /// and produces a finite loss / gradient step.
+    #[test]
+    fn teacher_forcing_gold_only_fires() {
+        let lib = seed_builtin_library();
+        let net_cfg = NetworkCfg { n: 8, ..NetworkCfg::default() };
+        let net = Network::new(&net_cfg, &lib, Device::Cpu).unwrap();
+        let mut opt = make_optimizer(&net, net_cfg.lr, net_cfg.weight_decay).unwrap();
+        let mut rng = Rng::new(0xBC0FF);
+        let mut baseline = EmaBaseline::new(0.0, 0.99);
+
+        let cfg = SelfPlayCfg {
+            dreams_per_iter: 8,
+            examples_per_dream: 3,
+            max_budget: 30, // tiny — guarantees the sampled q-search fails
+            time_budget_secs: 5,
+            use_gold_only: true,
+            teacher_forcing: true,
+            training_search: TrainingCfg { top_k: 8, temperature: 1.0, max_steps: 30 },
+            ..SelfPlayCfg::default()
+        };
+
+        let stats = train_self_play_iter(0, &net, &mut opt, &lib, &mut rng, &mut baseline, &cfg)
+            .expect("iter should succeed");
+
+        assert!(stats.total_loss.is_finite(), "total loss must be finite");
+        assert!(stats.bc_dreams > 0, "teacher forcing should fire on failed gold dreams");
+        assert!(stats.mean_bc_loss.is_finite() && stats.mean_bc_loss >= 0.0);
     }
 }

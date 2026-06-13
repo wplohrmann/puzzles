@@ -235,7 +235,9 @@ fn exec_builtin(
             let a = match args[0].as_int() { Some(v) => v, None => return Ok(Value::bottom("div: non-Int")) };
             let c = match args[1].as_int() { Some(v) => v, None => return Ok(Value::bottom("div: non-Int")) };
             if c == 0 { return Ok(Value::bottom("div by zero")); }
-            Ok(Value::Int(a / c))
+            // `i64::MIN / -1` overflows and hardware-traps (panics even
+            // in release). Match the wrapping semantics of Add/Sub/Mul.
+            Ok(Value::Int(a.wrapping_div(c)))
         }
         Lt => poly_lt(&args[0], &args[1]),
         Eq => poly_eq(&args[0], &args[1]),

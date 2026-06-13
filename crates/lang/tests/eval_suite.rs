@@ -115,6 +115,19 @@ fn div_by_zero_yields_bottom() {
 }
 
 #[test]
+fn div_min_by_neg_one_does_not_overflow() {
+    // `i64::MIN / -1` hardware-traps with plain `/`. The evaluator must
+    // wrap (like Add/Sub/Mul) rather than panic the whole search.
+    let mut b = Builder::new();
+    let div = b.pref(BuiltinId::Div);
+    let min = b.int(i64::MIN);
+    let neg1 = b.int(-1);
+    let prog = b.ap2(div, min, neg1);
+    let v = b.run(prog);
+    assert_eq!(v, Value::Int(i64::MIN), "wrapping_div should yield MIN");
+}
+
+#[test]
 fn add_with_bool_yields_bottom() {
     // `add true 1` is now constructable (no static type-check). At runtime
     // it must surface as Bottom.

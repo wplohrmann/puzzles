@@ -131,6 +131,65 @@ pub fn solve_guided_training(
     train_cfg: &TrainingCfg,
     rng: &mut Rng,
 ) -> Trajectory {
+    run_guided(
+        arena, lib, cfg, net, gcfg, head, mode, inputs, expected, train_cfg,
+        rng, None,
+    )
+}
+
+/// Teacher-forced variant. Instead of sampling, the search is driven
+/// down the build order of a known canonical program: `targets` is the
+/// canonical program's `App` nodes in topological (children-first)
+/// order. At each step the search forces selection of the next target,
+/// pulling it out of the frontier if it fell outside the top-K. The
+/// resulting trajectory records the same `(candidates, chosen)` format
+/// as a sampled search — so the actor-critic loss consumes it
+/// identically — but the chosen action is always the canonical one.
+///
+/// Used to give the q-head a supervised (behaviour-cloning) signal on
+/// dreams where the sampled q-search failed: we replay the search as if
+/// it had found the ground-truth program. Run with `head = Q`,
+/// `mode = Solve`, and `expected = Some(outputs)` so the canonical root
+/// terminates the search via the normal value-match path.
+///
+/// If a target never appears in the frontier (only possible under a
+/// restrictive `priority_floor`/`max_frontier`), forcing is abandoned
+/// and the trajectory is returned with `solution = None` — the caller
+/// then contributes no BC signal for that dream rather than crashing.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_guided_teacher_forced(
+    arena: &mut Arena,
+    lib: &Library,
+    cfg: &SearchConfig,
+    net: &Network,
+    gcfg: &GuidedConfig,
+    inputs: &[Value],
+    expected: Option<&[Value]>,
+    train_cfg: &TrainingCfg,
+    targets: &[NodeId],
+    rng: &mut Rng,
+) -> Trajectory {
+    run_guided(
+        arena, lib, cfg, net, gcfg, ScoringHead::Q, SearchMode::Solve, inputs,
+        expected, train_cfg, rng, Some(targets),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_guided(
+    arena: &mut Arena,
+    lib: &Library,
+    cfg: &SearchConfig,
+    net: &Network,
+    gcfg: &GuidedConfig,
+    head: ScoringHead,
+    mode: SearchMode,
+    inputs: &[Value],
+    expected: Option<&[Value]>,
+    train_cfg: &TrainingCfg,
+    rng: &mut Rng,
+    teacher: Option<&[NodeId]>,
+) -> Trajectory {
     let started = Instant::now();
     let stop_prim: Option<PrimId> = lib.lookup(BuiltinId::Stop.name());
 
@@ -205,10 +264,17 @@ pub fn solve_guided_training(
 
     let mut steps: Vec<TrajectoryStep> = Vec::new();
     let mut step_count = 0u32;
+    // Teacher forcing: index of the next canonical node to force.
+    let mut next_target = 0usize;
 
     while step_count < train_cfg.max_steps {
         if frontier.is_empty() { break; }
         if started.elapsed() > cfg.time_budget { break; }
+        // All canonical targets forced (the root should have terminated
+        // the search already via value-match; this is a safety guard).
+        if let Some(targets) = teacher {
+            if next_target >= targets.len() { break; }
+        }
 
         // Pop top-K (or fewer if frontier is shorter).
         let mut top_k_cands: Vec<TrainCand> =
@@ -221,9 +287,41 @@ pub fn solve_guided_training(
         }
         if top_k_cands.is_empty() { break; }
 
-        // Softmax-sample one.
-        let priorities: Vec<f32> = top_k_cands.iter().map(|c| c.priority).collect();
-        let chosen_idx = softmax_sample(&priorities, train_cfg.temperature, rng);
+        // Pick the action: teacher-force the next canonical node, or
+        // softmax-sample over the top-K.
+        let chosen_idx = match teacher {
+            Some(targets) => {
+                let target = targets[next_target];
+                match top_k_cands.iter().position(|c| c.node_id == target) {
+                    Some(i) => i,
+                    None => {
+                        // Target fell outside the top-K; pull it from the
+                        // wider frontier and append it to the candidate set.
+                        let mut rest: Vec<TrainCand> = frontier.drain().collect();
+                        match rest.iter().position(|c| c.node_id == target) {
+                            Some(j) => {
+                                let cand = rest.swap_remove(j);
+                                frontier = BinaryHeap::from(rest);
+                                top_k_cands.push(cand);
+                                top_k_cands.len() - 1
+                            }
+                            None => {
+                                // Never enqueued (restrictive frontier
+                                // config). Abandon forcing; the caller
+                                // gets a no-solution trajectory.
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                let priorities: Vec<f32> =
+                    top_k_cands.iter().map(|c| c.priority).collect();
+                softmax_sample(&priorities, train_cfg.temperature, rng)
+            }
+        };
+        if teacher.is_some() { next_target += 1; }
 
         let candidates_record: Vec<(NodeId, NodeId, u32)> = top_k_cands
             .iter()
@@ -663,5 +761,69 @@ mod tests {
             assert!(step.chosen_idx < step.candidates.len());
             assert!(!step.candidates.is_empty());
         }
+    }
+
+    /// Teacher forcing must reconstruct a known canonical program even
+    /// under a *random* network — the policy is overridden, so the
+    /// chosen action at every step is the next canonical node and the
+    /// search terminates with `solution.root == canonical`.
+    #[test]
+    fn teacher_forcing_reconstructs_canonical() {
+        use lang::builtin::BuiltinId;
+        use lang::construct::{app, lit, param, prim_ref};
+        use lang::ir::LitValue;
+
+        let (net, lib) = tiny_net();
+        let mut arena = Arena::new();
+
+        // Canonical program: f(v) = add(v, 2).  inputs → v, outputs → v+2.
+        let add = prim_ref(&mut arena, lib.lookup(BuiltinId::Add.name()).unwrap());
+        let p0 = param(&mut arena, 0);
+        let two = lit(&mut arena, LitValue::Int(2));
+        let inner = app(&mut arena, add, p0);
+        let canonical = app(&mut arena, inner, two); // App(App(add, p0), 2)
+
+        let inputs = vec![Value::Int(1), Value::Int(5), Value::Int(-3)];
+        let expected = vec![Value::Int(3), Value::Int(7), Value::Int(-1)];
+
+        // Build order: App nodes children-first.
+        let targets: Vec<NodeId> = arena
+            .reachable_topo(canonical)
+            .into_iter()
+            .filter(|&id| matches!(arena.kind(id), NodeKind::App { .. }))
+            .collect();
+        assert_eq!(targets.len(), 2, "add(v,2) has two App nodes");
+
+        let cfg = SearchConfig {
+            time_budget: Duration::from_secs(5),
+            // Literal `2` must be a seed so the canonical leaf hash-cons.
+            literal_seeds: vec![LitValue::Int(2)],
+            ..SearchConfig::default()
+        };
+        let gcfg = GuidedConfig::default();
+        let train_cfg = TrainingCfg {
+            top_k: 4,
+            temperature: 1.0,
+            max_steps: targets.len() as u32 + 1,
+        };
+        let mut rng = Rng::new(0x7e);
+
+        let traj = solve_guided_teacher_forced(
+            &mut arena, &lib, &cfg, &net, &gcfg,
+            &inputs, Some(&expected), &train_cfg, &targets, &mut rng,
+        );
+
+        let sol = traj.solution.expect("teacher forcing should reconstruct the program");
+        assert_eq!(sol.root, canonical, "reconstructed root must be the canonical program");
+        // Every forced step created a canonical App node.
+        for step in &traj.steps {
+            assert!(
+                sol.s_nodes.contains(&step.created_node),
+                "forced node {:?} not in solution DAG",
+                step.created_node,
+            );
+        }
+        // The final forced step created the root.
+        assert_eq!(traj.steps.last().unwrap().created_node, canonical);
     }
 }

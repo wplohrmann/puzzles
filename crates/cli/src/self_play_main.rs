@@ -47,6 +47,7 @@ struct Args {
     save_model: Option<PathBuf>,
     poser_stop_bias: f32,
     use_gold_only: bool,
+    teacher_forcing: bool,
 }
 
 impl Default for Args {
@@ -76,6 +77,7 @@ impl Default for Args {
             save_model: None,
             poser_stop_bias: 1.0,
             use_gold_only: false,
+            teacher_forcing: true,
         }
     }
 }
@@ -110,6 +112,7 @@ fn parse() -> Args {
             "--save-model" => { i += 1; a.save_model = Some(PathBuf::from(&raw[i])); }
             "--poser-stop-bias" => { i += 1; a.poser_stop_bias = raw[i].parse().unwrap(); }
             "--use-gold-only" => { a.use_gold_only = true; }
+            "--no-teacher-forcing" => { a.teacher_forcing = false; }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -169,7 +172,11 @@ fn print_help() {
         --use-gold-only            Skip the poser; sample tasks from the\n\
                                    hand-crafted gold-standard set (arith\n\
                                    + bool truth tables). Trains q, value,\n\
-                                   forward heads + SIGReg. Poser bypassed.\n"
+                                   forward heads + SIGReg. Poser bypassed.\n\
+        --no-teacher-forcing       Disable behaviour-cloning on failed\n\
+                                   q-searches (on by default): replay the\n\
+                                   canonical program to give the q-head a\n\
+                                   gradient even when search finds nothing.\n"
     );
 }
 
@@ -213,6 +220,7 @@ fn main() {
         time_budget_secs: args.time_budget_secs,
         poser_ema_decay: args.poser_ema_decay,
         use_gold_only: args.use_gold_only,
+        teacher_forcing: args.teacher_forcing,
     };
 
     println!(
@@ -294,7 +302,7 @@ fn format_stats_line(s: &SelfPlayStats) -> String {
     format!(
         "iter{:5}  loss={:.3}  r_q={:.3}  r_p={:.3}  solved={:.0}%  valid={:.0}%  \
          N_poser={:.1}  S_pool={:.0}  S_sol={:.1}  fwd_mse={:.4}  \
-         sigreg={:.4}  H_π={:.3}  |adv|={:.3}",
+         sigreg={:.4}  H_π={:.3}  |adv|={:.3}  bc={}  bc_loss={:.3}",
         s.iter + 1,
         s.total_loss,
         s.mean_r_searcher,
@@ -308,7 +316,32 @@ fn format_stats_line(s: &SelfPlayStats) -> String {
         s.sigreg_value,
         s.policy_entropy,
         s.mean_advantage,
-    )
+        s.bc_dreams,
+        s.mean_bc_loss,
+    ) + &format_category_line(s)
+}
+
+/// Per-category solve / behaviour-cloning breakdown (gold-only mode).
+/// Empty in self-play mode. Each entry: `cat=solved/dreams(bc=N)`.
+fn format_category_line(s: &SelfPlayStats) -> String {
+    if s.per_category.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = s
+        .per_category
+        .iter()
+        .map(|c| {
+            format!(
+                "{}={:.0}%({}/{} bc{})",
+                c.category.name(),
+                100.0 * c.solve_rate(),
+                c.solved,
+                c.dreams,
+                c.bc_fired,
+            )
+        })
+        .collect();
+    format!("\n           {}", parts.join("  "))
 }
 
 fn render_markdown(stats: &[SelfPlayStats]) -> String {

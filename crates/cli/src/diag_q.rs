@@ -41,6 +41,10 @@ struct Args {
     n: usize,
     load: Option<PathBuf>,
     show_examples: usize,
+    /// Search softmax temperature. Default 1.0 (matches training-time
+    /// sampling). Use ~0 for deterministic greedy eval — required for a
+    /// clean capability probe and for comparing budgets monotonically.
+    temperature: f32,
 }
 
 impl Default for Args {
@@ -53,6 +57,7 @@ impl Default for Args {
             n: 32,
             load: None,
             show_examples: 3,
+            temperature: 1.0,
         }
     }
 }
@@ -70,6 +75,7 @@ fn parse() -> Args {
             "--n" => { i += 1; a.n = raw[i].parse().unwrap(); }
             "--load" => { i += 1; a.load = Some(PathBuf::from(&raw[i])); }
             "--show-examples" => { i += 1; a.show_examples = raw[i].parse().unwrap(); }
+            "--temperature" => { i += 1; a.temperature = raw[i].parse().unwrap(); }
             "--help" | "-h" => {
                 println!(
                     "graph-seek-diag-q\n\
@@ -79,7 +85,8 @@ fn parse() -> Args {
                     --examples N            I/O per arith task (default 3)\n\
                     --n N                   embedding width (default 32)\n\
                     --load PATH             load network weights\n\
-                    --show-examples N       sample programs to dump per category (default 3)\n"
+                    --show-examples N       sample programs to dump per category (default 3)\n\
+                    --temperature F         search softmax temp (default 1.0; ~0 = greedy)\n"
                 );
                 std::process::exit(0);
             }
@@ -150,7 +157,13 @@ fn main() {
         println!("# Fresh-init network (no --load)");
     }
 
-    let mut rng = Rng::new(args.seed);
+    // Two independent RNG streams. Tasks are sampled from `task_rng`,
+    // the search draws from `search_rng`. Keeping them separate means
+    // the *task set* is identical across budgets / temperatures (the
+    // search no longer desyncs task sampling by consuming a
+    // budget-dependent amount of randomness), so runs are comparable.
+    let mut task_rng = Rng::new(args.seed);
+    let mut search_rng = Rng::new(args.seed ^ 0x9E37_79B9_7F4A_7C15);
 
     let scfg = SearchConfig {
         time_budget: Duration::from_secs(10),
@@ -165,7 +178,7 @@ fn main() {
     };
     let gcfg = GuidedConfig::default();
     let tcfg = TrainingCfg {
-        top_k: 16, temperature: 1.0, max_steps: args.max_budget,
+        top_k: 16, temperature: args.temperature, max_steps: args.max_budget,
     };
 
     let categories = [
@@ -180,11 +193,11 @@ fn main() {
     let mut arena = Arena::new();
     for cat in &categories {
         for _ in 0..args.per_category {
-            let task = sample_gold_in_category(*cat, &mut rng, args.examples_per_dream);
+            let task = sample_gold_in_category(*cat, &mut task_rng, args.examples_per_dream);
             let traj = solve_guided_training(
                 &mut arena, &lib, &scfg, &net, &gcfg,
                 ScoringHead::Q, SearchMode::Solve,
-                &task.inputs, Some(&task.outputs), &tcfg, &mut rng,
+                &task.inputs, Some(&task.outputs), &tcfg, &mut search_rng,
             );
             let s = stats.get_mut(cat).unwrap();
             s.total += 1;
@@ -264,7 +277,7 @@ fn main() {
     // pairs. If the trunk has collapsed, per-dim variance will be
     // near zero — diagnostic for "embedding collapse".
     println!("\n## Trunk embedding statistics (h_value)\n");
-    embedding_stats(&net, &lib, &mut rng, args.n);
+    embedding_stats(&net, &lib, &mut task_rng, args.n);
 }
 
 fn embedding_stats(net: &Network, lib: &lang::library::Library, rng: &mut Rng, n: usize) {
