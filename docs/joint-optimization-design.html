@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neural nets as primitives — an incremental DAG-of-subnets architecture</title>
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] },
+    svg: { fontCache: 'global' }
+  };
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" id="MathJax-script" async></script>
+<style>
+  :root {
+    --fg: #1a1a1a;
+    --muted: #5a5a5a;
+    --bg: #fbfbf9;
+    --card: #ffffff;
+    --accent: #2b6cb0;
+    --accent-soft: #ebf2fa;
+    --warn-bg: #fff6e9;
+    --warn-border: #e6a23c;
+    --good-bg: #edf7ed;
+    --good-border: #5a9a5a;
+    --rule: #e4e4df;
+    --code-bg: #f3f3ef;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    line-height: 1.65;
+    font-size: 17px;
+  }
+  .wrap { max-width: 840px; margin: 0 auto; padding: 56px 28px 120px; }
+  header.title { margin-bottom: 40px; }
+  h1 { font-size: 2.0rem; line-height: 1.2; margin: 0 0 10px; letter-spacing: -0.01em; }
+  .subtitle { color: var(--muted); font-size: 1.05rem; margin: 0; }
+  h2 {
+    font-size: 1.4rem; margin: 52px 0 14px; padding-bottom: 8px;
+    border-bottom: 2px solid var(--rule); letter-spacing: -0.01em;
+  }
+  h3 { font-size: 1.12rem; margin: 30px 0 8px; }
+  p { margin: 14px 0; }
+  ul { margin: 14px 0; padding-left: 22px; }
+  li { margin: 8px 0; }
+  strong { font-weight: 650; }
+  code {
+    background: var(--code-bg); padding: 1px 6px; border-radius: 4px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.88em;
+  }
+  .lead {
+    font-size: 1.08rem; background: var(--accent-soft);
+    border-left: 4px solid var(--accent); padding: 16px 20px; border-radius: 0 8px 8px 0;
+  }
+  .eq {
+    background: var(--card); border: 1px solid var(--rule); border-radius: 10px;
+    padding: 8px 18px; margin: 22px 0; overflow-x: auto;
+  }
+  ol.loop { padding-left: 0; list-style: none; counter-reset: step; }
+  ol.loop > li {
+    counter-increment: step; position: relative; padding: 12px 0 12px 52px; border-bottom: 1px solid var(--rule);
+  }
+  ol.loop > li:last-child { border-bottom: none; }
+  ol.loop > li::before {
+    content: counter(step); position: absolute; left: 0; top: 12px;
+    width: 32px; height: 32px; background: var(--accent); color: #fff;
+    border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    font-weight: 650; font-size: 0.95rem;
+  }
+  .tag {
+    display: inline-block; font-size: 0.72rem; font-weight: 650; text-transform: uppercase;
+    letter-spacing: 0.04em; color: var(--accent); background: var(--accent-soft);
+    padding: 2px 8px; border-radius: 5px; vertical-align: middle; margin-left: 8px;
+  }
+  .callout {
+    background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 10px;
+    padding: 4px 22px; margin: 22px 0;
+  }
+  .callout h2 { border: none; margin-top: 18px; }
+  .note {
+    background: var(--good-bg); border: 1px solid var(--good-border); border-radius: 10px;
+    padding: 4px 22px; margin: 22px 0;
+  }
+  .note h3 { margin-top: 18px; }
+  table { border-collapse: collapse; width: 100%; margin: 22px 0; font-size: 0.95rem; }
+  th, td { border: 1px solid var(--rule); padding: 9px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--accent-soft); font-weight: 650; }
+  .diagram {
+    background: var(--card); border: 1px solid var(--rule); border-radius: 10px;
+    padding: 18px 20px; margin: 22px 0; overflow-x: auto;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.82rem;
+    line-height: 1.45; white-space: pre; color: var(--fg);
+  }
+  .status { color: var(--muted); font-style: italic; }
+  footer { margin-top: 60px; padding-top: 20px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 0.9rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="title">
+  <h1>Neural nets as primitives: an incremental DAG-of-subnets architecture</h1>
+  <p class="subtitle">A growing graph of small frozen neural modules, assembled by neural-guided search and gradient descent, selected by Minimum Description Length.</p>
+  <p class="status">Status: design proposal for review — not yet implemented. Supersedes the earlier joint-from-scratch sketch.</p>
+</header>
+
+<p class="lead">
+Instead of a fixed library of symbolic primitives, the library becomes a <strong>DAG of small neural
+subnets</strong> grown one task at a time. To solve a task we pick a few attachment points on the existing
+graph, hang small new <em>heads</em> on them, freeze everything that came before, and train only the new
+heads by gradient descent until they reproduce the target. Several heads succeed; we keep the one that
+minimizes a Minimum Description Length objective. The graph ratchets toward the domain exactly as a
+DreamCoder library does — but its primitives are learned by gradient descent rather than mined by
+compression.
+</p>
+
+<h2>Lineage</h2>
+<p>
+This sits at the intersection of three known ideas, which is reassuring rather than novel-for-its-own-sake:
+</p>
+<ul>
+  <li><strong>Cascade-Correlation</strong> (Fahlman &amp; Lebiere, 1990) — add units one at a time, freeze all
+      existing weights, train only the new unit against the residual. Every unit's activation becomes an
+      input available to all future units.</li>
+  <li><strong>Progressive Neural Networks</strong> (Rusu et al., 2016) — freeze old columns, attach a new
+      column with lateral connections into the frozen features, train only the new params. No catastrophic
+      forgetting by construction.</li>
+  <li><strong>DreamCoder</strong> (Ellis et al., 2021) — a library that ratchets toward the domain, a
+      wake/sleep loop, and an MDL objective where only <em>novel</em> structure costs description bits.</li>
+</ul>
+
+<h2>The objective: one incremental MDL functional</h2>
+<p>
+Every design choice below serves a single objective. For a task with examples $D$, solved by attaching a
+new head $h$ (architecture $A_h$, weights $\theta_h$) onto the frozen existing graph $G$, we minimize the
+description length in bits:
+</p>
+
+<div class="eq">
+$$ L \;=\; \underbrace{L(A_h \mid G)}_{\text{which nodes to read + which block}} \;+\; \underbrace{L(\theta_h)}_{\text{new weights}} \;+\; \underbrace{L(D \mid G, A_h, \theta_h)}_{\text{data misfit (NLL)}} $$
+</div>
+
+<p>
+The crucial property: the frozen graph $G$ costs <strong>zero marginal bits</strong> — it was already paid
+for by earlier tasks and is amortized across every task that reuses it. So per task we only code a small new
+head, and the marginal description length <em>shrinks over time</em> as more of the solution is reused. This
+is why "parameter count = program length" — which was meaningless for a net trained from scratch — becomes
+well-behaved here: a node is one unit regardless of weight magnitude, wiring is a discrete choice with a
+clean bit-cost, and only the small novel head enters the count.
+</p>
+
+<div class="note">
+<h3>Why selection is post-hoc, not a loss term</h3>
+<p>
+We do <strong>not</strong> fold the $L(A_h)+L(\theta_h)$ terms into the gradient objective during fitting.
+Two reasons: (1) the MDL penalty can dominate before any head has shown whether it can converge, biasing
+toward the shortest path prematurely; (2) once a head reaches zero data loss, no gradient flows through a
+selection gate, so a differentiable sparsity term has nothing to push against exactly when it matters.
+Instead we <strong>fit each candidate head with pure data loss, then select among the converged ones by
+MDL.</strong> Fitting and selection are cleanly separated.
+</p>
+</div>
+
+<h2>Per-task growth: multi-head, freeze, fit, select</h2>
+<ol class="loop">
+  <li><strong>Propose attachment points.</strong> The existing node-picker (the trained <code>q</code>-head)
+      ranks nodes in $G$ as candidate inputs for a new head. Its per-node embedding already splits into a
+      structural part and a <em>value</em> part — the node's activations on this task's examples — and the
+      value part is exactly the right signal for "is this node useful for this target." Take a top-$K$
+      shortlist; this is what tames the combinatorial attachment space.</li>
+  <li><strong>Hang $K$ candidate heads.</strong> Each head reads one (or a few) shortlisted nodes and is a
+      small stack of thin units topped by a decoder back to grid space.</li>
+  <li><strong>Freeze $G$, train the heads.</strong> All existing parameters are frozen — old tasks remain
+      solved by construction. Each head trains by gradient descent on pure data loss until it reproduces the
+      target (or is disqualified for failing to).</li>
+  <li><strong>Select by MDL.</strong> Among the heads that exactly fit, keep the one minimizing $L$ — fewest
+      new bits, most reuse. The losing heads are discarded.</li>
+  <li><strong>Commit or discard.</strong> If the winning head's modules look reusable (see <em>Library &amp;
+      pruning</em>), commit them as permanent nodes in $G$; otherwise treat them as a throwaway solution that
+      solved this task but does not enlarge the library.</li>
+</ol>
+
+<h2>Node granularity: everything is an output <span class="tag">resolves hidden vs. output</span></h2>
+<p>
+There is no real distinction between "hidden features" and "outputs" — there is only a distinction if a node
+is a coarse sealed block. The moment <strong>every unit's output is a first-class node in the DAG</strong>, a
+later head can tap any earlier activation, and "the final answer of task&nbsp;3" and "an intermediate feature
+inside task&nbsp;3's subnet" are the same kind of thing: a node you can read from. Nothing valuable is
+discarded because nothing is hidden. This is cascade-correlation's topology, and it makes the neural DAG
+isomorphic to the symbolic one: a new unit reading from existing nodes is structurally identical to an
+<code>App(f, a)</code>, which the picker already knows how to score.
+</p>
+<p>We therefore separate two granularities that are easy to conflate:</p>
+<ul>
+  <li><strong>Addressable node = a thin unit</strong> (linear&nbsp;+&nbsp;nonlinearity over the latent). Fine,
+      so everything is reusable and nothing is sealed.</li>
+  <li><strong>Per-task trained growth = a small head</strong> (a few thin units + a decoder), trained
+      together. Every layer inside it still becomes an addressable node for future tasks.</li>
+</ul>
+<p>
+Fine nodes also help the few-shot regime: a thin head has few parameters, so it generalizes better from
+~3 examples than a fat block, and the residual problem it must solve — given rich frozen features — is much
+smaller than learning the task from pixels.
+</p>
+
+<h2>The uniform latent interface: the universal currency <span class="tag">the enabler</span></h2>
+<p>
+For "any node can feed any node" to hold, edges need a common type. The uniform latent interface is the
+neural analog of the symbolic core's single <code>Value</code> type: in the untyped calculus <em>any</em>
+<code>App(f, a)</code> is admissible because everything on an edge is one universal type, and mismatches
+surface softly as <code>Bottom</code> at evaluation rather than as construction-time errors. The latent
+interface answers the same question for the neural DAG — <strong>what flows along the edges so that
+composition is always legal and any node is substitutable for any other?</strong>
+</p>
+
+<h3>Precisely which problems it solves</h3>
+<table>
+  <tr><th>Problem</th><th>Without a uniform interface</th><th>With it</th></tr>
+  <tr>
+    <td>Picker action space</td>
+    <td>Action is "read node X <em>through an adapter of shape S</em>" — shape bookkeeping pollutes every action.</td>
+    <td>Action is just "read node X" — a clean discrete symbol, exactly the <code>App(f,a)</code> shape the q-head scores.</td>
+  </tr>
+  <tr>
+    <td>Per-task MDL accounting</td>
+    <td>Every edge carries a learned adapter with parameters; wiring is no longer free; the "small new head" balloons.</td>
+    <td>Wiring is free; only the small head costs bits; the amortization story holds.</td>
+  </tr>
+  <tr>
+    <td>Attachment-ranking signal</td>
+    <td>"Distance from node's activation to the target" isn't comparable across heterogeneous shapes.</td>
+    <td>Every node's value lives in one space; usefulness is computed identically for all nodes.</td>
+  </tr>
+  <tr>
+    <td>Substitutability / reuse</td>
+    <td>Substitutability is shape-gated; library-reuse semantics degrade.</td>
+    <td>A node is characterized by its latent value and can stand in anywhere — hash-consing-like identity survives.</td>
+  </tr>
+</table>
+
+<p>
+<strong>Honest caveat — it is a property-preservation choice, not a strict necessity.</strong> You could
+instead insert a learned linear projection at every edge and compose any shapes. The uniform latent is not
+solving an impossibility; it is preserving the four properties above that make the DAG behave like a program
+library rather than a tangle of shape-specific glue. It does <em>not</em> solve few-shot generalization or
+exactness.
+</p>
+
+<div class="callout">
+<h2>"Uniform" means uniform in channels, not in total shape</h2>
+<p>
+ARC grids run from 1&times;1 to 30&times;30. If the latent were a single fixed-dimension vector, every
+variable-size grid would be forced through a fixed bottleneck — losing spatial information and actively
+fighting the domain. The right notion is a <strong>feature map of a fixed channel count $C$ at the grid's
+current $H\times W$</strong>: uniform in $C$ (so any node feeds any node channel-wise), variable in spatial
+extent (so the grid is not crushed). A fixed encoder maps the input grid into this space; per-task decoders
+map latents back to grids. This choice silently determines how much representation is expressible, and is the
+first thing to pin down in the next pass.
+</p>
+</div>
+
+<h2>Wake / sleep: freeze-and-grow vs. consolidate-and-re-solve</h2>
+<p>
+Freezing buys no-forgetting and cheap training, but it ossifies: early subnets were trained to <em>solve
+early tasks</em>, not to be good reusable features, and left frozen forever the substrate becomes
+order-dependent — a bad early task poisons everything downstream. The corrective is a periodic joint-retrain
+stage, which is DreamCoder's consolidation / abstraction sleep. It is <strong>not optional polish</strong>;
+it is the load-bearing counterweight to freezing, and it has two requirements:
+</p>
+<ul>
+  <li><strong>Replay buffer of all solved tasks.</strong> Consolidation jointly trains all parameters against
+      a multi-task loss over the buffer; otherwise it reintroduces the forgetting that freezing avoided.</li>
+  <li><strong>Re-solve early tasks.</strong> After consolidation, re-solve earlier tasks with the now-richer
+      graph and keep the MDL-best solution. A task is not solved once; it is re-solved more cheaply as the
+      library improves. This is what cancels order-dependence.</li>
+</ul>
+<p>The rhythm:</p>
+<div class="diagram">  WAKE   freeze G,  pick attachment points,  train K heads,  select by MDL,  commit reusable modules
+  SLEEP  jointly retrain all params on the replay buffer  →  re-solve earlier tasks  →  keep MDL-best
+  ─────────────────────────────────────────────────────────────────────────────────────────────────
+  repeat:  the graph ratchets toward the domain; per-task description length shrinks over time</div>
+
+<h2>Library &amp; pruning</h2>
+<p>
+The graph would otherwise grow forever. Not every task's head should join the permanent DAG: commit a module
+only if it earns its MDL keep or gets reused (DreamCoder keeps only high-value abstractions). Otherwise the
+task is solved with a throwaway head that is discarded. Inference cost for any task is only the subgraph
+reachable from its head, not the whole graph, so a reuse-gated, pruned library keeps both memory and
+forward-pass cost bounded. <span class="status">Open: the exact criterion for "important enough to keep" vs.
+"throwaway."</span>
+</p>
+
+<h2>End-to-end picture</h2>
+<div class="diagram">          grid in
+             │
+        ┌────▼────┐   fixed
+        │ encoder │   (grid → C-channel latent @ H×W)
+        └────┬────┘
+             │            ┌─────────────────── frozen graph G ───────────────────┐
+             ▼            │   every thin unit's output is an addressable node     │
+        ●────────●────────●────────●────────●  …  (latent-space DAG)              │
+             │        ╲       │        ╲       ╲                                  │
+             │         ╲      │         ╲       ╲   q-head ranks nodes by         │
+             │          ╲     │          ╲       ╲  structural + value embedding  │
+             └───────────┴────┴───────────┴────────┘                             │
+                              │  top-K attachment points                         │
+                    ┌─────────┼─────────┬─────────┐                              │
+                    ▼         ▼         ▼         ▼    ← K candidate heads        │
+                 head₁     head₂     head₃     head₄     (trainable; G frozen)    │
+                    │         │         │         │                              │
+                 decoder   decoder   decoder   decoder  (latent → grid)          │
+                    │         │         │         │                              │
+                    └────── all fit the target; keep argmin MDL ───────┘         │
+                                                                                 │
+                              winner's modules committed if reusable ────────────┘</div>
+
+<div class="callout">
+<h2>The risk to keep in view</h2>
+<p>
+The deep reason symbolic search wins on ARC is that "simplest discrete program that fits 3 examples" is a
+near-magic prior, and "simplest head that fits 3 examples" is a continuous-smoothness prior, which is a worse
+match for ARC's compositional, exact, discrete rules. The incremental structure helps — composition shrinks
+each residual problem, and thin heads are well-regularized — but it does not fully close the gap. The MDL
+machinery makes the <em>complexity measure</em> principled; it does not guarantee the low-complexity
+attractor that gradient descent finds is the <em>right rule</em>.
+</p>
+<p>
+<strong>Falsifiable first experiment.</strong> Take 5–10 ARC tasks the symbolic system already solves,
+hand-build the correct small head for each on top of a hand-chosen attachment, and check whether
+MDL-regularized fitting on 3 examples recovers the rule and generalizes to the test grid <em>exactly</em>.
+If the hand-fed, right-architecture case already fails to generalize from 3 examples, the search machinery is
+moot and the direction is dead — cheap to find out, and it isolates the one assumption everything rests on.
+</p>
+</div>
+
+<h2>Open questions for the next pass</h2>
+<ul>
+  <li>The latent: channel count $C$, how the fixed encoder/decoder boundary handles variable $H\times W$, and how much representation that makes expressible.</li>
+  <li>Head shape: depth/width of the per-task head, and the block pool the picker chooses from.</li>
+  <li>The keep-vs-throwaway criterion for committing modules to the permanent graph.</li>
+  <li>Consolidation schedule: how often to sleep, and how re-solving interacts with committed modules.</li>
+  <li>Whether the picker's job stays learnable as the node pool grows into the thousands.</li>
+</ul>
+
+<footer>
+  Design proposal — incremental DAG-of-subnets variant of the program-synthesis project. Formulae rendered with MathJax (needs network access). For review; nothing else in the codebase changed.
+</footer>
+
+</div>
+</body>
+</html>
